@@ -4,7 +4,7 @@ This repo contains a small CLI for bulk ownership-transfer workflows inside a Go
 
 ## Security
 
-See [SECURITY.md](/Users/marshall/src/github.com/marshalltech81/gdrive-ownership-transfer/SECURITY.md:1) for how to report vulnerabilities privately.
+See [SECURITY.md](SECURITY.md) for how to report vulnerabilities privately.
 
 It is designed for the personal-account case where Google does **not** provide an admin bulk-transfer feature. The script helps with the work Google does allow through the Drive API:
 
@@ -44,7 +44,7 @@ For contributor tooling:
 uv sync --dev
 ```
 
-This repository is `uv`-first and includes a committed `uv.lock`. The local Python version is pinned in [.python-version](/Users/marshall/src/github.com/marshalltech81/gdrive-ownership-transfer/.python-version:1).
+This repository is `uv`-first and includes a committed `uv.lock`. The local Python version is pinned in [.python-version](.python-version).
 
 ## Usage
 

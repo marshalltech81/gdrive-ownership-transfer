@@ -374,7 +374,7 @@ def run_request(
     email_message: str | None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    applied_count = 0
+    attempted_count = 0
 
     for item in walk_tree(service, root, page_size=page_size):
         plan = plan_request(item, target_email)
@@ -386,7 +386,7 @@ def run_request(
             rows.append(row)
             continue
 
-        if max_items is not None and applied_count >= max_items:
+        if max_items is not None and attempted_count >= max_items:
             row["status"] = "skipped"
             row["detail"] = f"{plan.detail}; max-items reached"
             print(f"[skip] {item.path} :: max-items reached")
@@ -399,6 +399,8 @@ def run_request(
             rows.append(row)
             continue
 
+        # Count every attempted mutation so max-items remains a hard cap on side effects.
+        attempted_count += 1
         try:
             apply_request_plan(
                 service,
@@ -407,7 +409,6 @@ def run_request(
                 plan=plan,
                 email_message=email_message,
             )
-            applied_count += 1
             row["status"] = "applied"
             print(f"[applied] {item.path} :: {plan.detail}")
         except HttpError as exc:
@@ -429,7 +430,7 @@ def run_accept(
     max_items: int | None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    applied_count = 0
+    attempted_count = 0
 
     for item in walk_tree(service, root, page_size=page_size):
         plan = plan_accept(item, recipient_email)
@@ -441,7 +442,7 @@ def run_accept(
             rows.append(row)
             continue
 
-        if max_items is not None and applied_count >= max_items:
+        if max_items is not None and attempted_count >= max_items:
             row["status"] = "skipped"
             row["detail"] = f"{plan.detail}; max-items reached"
             print(f"[skip] {item.path} :: max-items reached")
@@ -454,9 +455,10 @@ def run_accept(
             rows.append(row)
             continue
 
+        # Count every attempted mutation so max-items remains a hard cap on side effects.
+        attempted_count += 1
         try:
             apply_accept_plan(service, item, plan)
-            applied_count += 1
             row["status"] = "applied"
             print(f"[applied] {item.path} :: {plan.detail}")
         except HttpError as exc:

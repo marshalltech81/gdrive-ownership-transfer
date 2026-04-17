@@ -40,7 +40,9 @@ jobs:
 
       - name: Validate pull request title
         if: github.event_name == 'pull_request'
-        run: python scripts/check_conventional_commit.py --message "${{ github.event.pull_request.title }}"
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python scripts/check_conventional_commit.py --message "$PR_TITLE"
 
       - name: Validate pushed commit subjects
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'

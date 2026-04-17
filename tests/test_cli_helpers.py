@@ -589,6 +589,31 @@ def test_run_request_max_items_stops_after_first_apply(monkeypatch: pytest.Monke
     assert calls == ["applied"]
 
 
+def test_run_request_max_items_stops_after_first_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [make_item(path="Shared/one"), make_item(path="Shared/two")]
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_args, **_kwargs: items)
+
+    def fake_apply_request_plan(*_args: object, **_kwargs: object) -> None:
+        calls.append("attempted")
+        raise make_http_error(403, "quota exceeded")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.apply_request_plan", fake_apply_request_plan)
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        page_size=10,
+        apply=True,
+        max_items=1,
+        email_message=None,
+    )
+
+    assert [row["status"] for row in rows] == ["error", "skipped"]
+    assert calls == ["attempted"]
+
+
 def test_run_accept_skips_when_plan_says_skip(monkeypatch: pytest.MonkeyPatch) -> None:
     item = make_item()
     monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_args, **_kwargs: [item])
@@ -662,6 +687,41 @@ def test_run_accept_max_items_stops_after_first_apply(monkeypatch: pytest.Monkey
 
     assert [row["status"] for row in rows] == ["applied", "skipped"]
     assert calls == ["applied"]
+
+
+def test_run_accept_max_items_stops_after_first_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    pending_item = make_item(
+        permissions=(
+            {
+                "id": "perm-2",
+                "type": "user",
+                "emailAddress": "recipient@example.com",
+                "role": "writer",
+                "pendingOwner": True,
+            },
+        )
+    )
+    items = [pending_item, pending_item]
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_args, **_kwargs: items)
+
+    def fake_apply_accept_plan(*_args: object, **_kwargs: object) -> None:
+        calls.append("attempted")
+        raise make_http_error(403, "quota exceeded")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.apply_accept_plan", fake_apply_accept_plan)
+
+    rows = run_accept(
+        object(),
+        {},
+        recipient_email="recipient@example.com",
+        page_size=10,
+        apply=True,
+        max_items=1,
+    )
+
+    assert [row["status"] for row in rows] == ["error", "skipped"]
+    assert calls == ["attempted"]
 
 
 def test_run_accept_apply_handles_error(monkeypatch: pytest.MonkeyPatch) -> None:

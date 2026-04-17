@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     messages = list(args.message)
     for path_str in args.paths:
         path = Path(path_str)
-        messages.append(path.read_text(encoding="utf-8").splitlines()[0].strip())
+        lines = path.read_text(encoding="utf-8").splitlines()
+        messages.append(lines[0].strip() if lines else "")
 
     if args.revision_range:
         messages.extend(read_commit_subjects_from_range(args.revision_range))
