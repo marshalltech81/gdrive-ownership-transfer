@@ -1162,7 +1162,7 @@ def test_apply_request_plan_create_permission_no_message() -> None:
     )
 
     assert "emailMessage" not in permissions_api.create_calls[0]
-    assert permissions_api.create_calls[0]["sendNotificationEmail"] is False
+    assert permissions_api.create_calls[0]["sendNotificationEmail"] is True
 
 
 def test_apply_request_plan_update_permission() -> None:
@@ -2617,7 +2617,7 @@ def test_run_auth_revoke_handles_unlink_error(
     result = run_auth_revoke(
         token_file=token_file,
     )
-    assert result == 0
+    assert result == 1
 
 
 # ---------------------------------------------------------------------------

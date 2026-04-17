@@ -958,7 +958,11 @@ def _run_loop(  # noqa: C901
                 flush=True,
                 file=sys.stderr,
             )
-            if input().strip().lower() != "y":
+            try:
+                answer = input().strip().lower()
+            except EOFError:
+                answer = ""
+            if answer != "y":
                 raise SystemExit("Aborted.")
 
     # Dry-run diff table mode — show table instead of per-item lines
@@ -1026,7 +1030,11 @@ def _run_loop(  # noqa: C901
                         flush=True,
                         file=sys.stderr,
                     )
-                    if input().strip().lower() != "y":
+                    try:
+                        answer = input().strip().lower()
+                    except EOFError:
+                        answer = ""
+                    if answer != "y":
                         row["status"] = "skipped"
                         row["detail"] = "skipped interactively"
                         return row
@@ -1327,7 +1335,7 @@ def apply_request_plan(
         create_kwargs: dict[str, Any] = {
             "fileId": item.id,
             "supportsAllDrives": True,
-            "sendNotificationEmail": bool(email_message),
+            "sendNotificationEmail": True,
             "body": {
                 "type": "user",
                 "role": "writer",
@@ -1552,9 +1560,11 @@ def run_auth_revoke(*, token_file: Path) -> int:
         except Exception as exc:
             print(f"Warning: could not reach revoke endpoint: {exc}", file=sys.stderr)
 
+    deleted = False
     try:
         token_file.unlink()
         print(f"Token file deleted: {token_file}")
+        deleted = True
     except OSError as exc:
         print(f"Warning: could not delete token file: {exc}", file=sys.stderr)
 
@@ -1562,7 +1572,7 @@ def run_auth_revoke(*, token_file: Path) -> int:
         print("OAuth token revoked successfully.")
     else:
         print("OAuth token file removed (revocation may not have completed).")
-    return 0
+    return 0 if deleted else 1
 
 
 # ---------------------------------------------------------------------------
