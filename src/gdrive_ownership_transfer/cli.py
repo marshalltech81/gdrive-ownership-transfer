@@ -695,6 +695,7 @@ def load_checkpoint(path: Path) -> set[str]:
 
 def save_checkpoint(path: Path, completed_ids: set[str]) -> None:
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"completed_ids": sorted(completed_ids)}, indent=2), encoding="utf-8"
         )
@@ -1359,7 +1360,19 @@ def run_diff(csv_a: Path, csv_b: Path, *, key_field: str = "item_id") -> int:
                     f"{path}: key field {key_field!r} not found. "
                     f"Available fields: {', '.join(fieldnames) if fieldnames else '(none)'}"
                 )
-            return {row[key_field]: row for row in reader if row.get(key_field)}
+            rows: dict[str, dict[str, str]] = {}
+            total = 0
+            for row in reader:
+                total += 1
+                key = row.get(key_field)
+                if key:
+                    rows[key] = row
+            if total > 0 and not rows:
+                raise ValueError(
+                    f"{path}: {total} row(s) found but none have a non-empty value "
+                    f"for key field {key_field!r}."
+                )
+            return rows
 
     try:
         rows_a = _read_csv(csv_a)
