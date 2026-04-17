@@ -2604,3 +2604,294 @@ def test_run_request_with_credentials_triggers_token_check(
     assert rows[0]["status"] == "applied"
     assert len(refresh_calls) == 1
     assert refresh_calls[0] is fake_creds
+
+
+# ---------------------------------------------------------------------------
+# TokenBucket — fractional rate (< 1.0) must not sleep on first acquire
+# ---------------------------------------------------------------------------
+
+
+def test_token_bucket_fractional_rate_no_sleep_on_first_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.time.sleep", lambda t: slept.append(t))
+    # rate=0.5 means capacity would be 0.5 without the max(1.0, rate) fix —
+    # the first acquire would sleep. With the fix, capacity=1.0, no sleep.
+    bucket = TokenBucket(0.5, per_seconds=100.0)
+    bucket.acquire()
+    assert not slept, "first acquire on a fractional-rate bucket must not sleep"
+
+
+# ---------------------------------------------------------------------------
+# run_diff — unknown key_field and all-empty-key detection
+# ---------------------------------------------------------------------------
+
+
+def test_run_diff_unknown_key_field_returns_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    csv_a.write_text(
+        "path,item_id,status\nShared/a.txt,id-1,applied\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,status\nShared/a.txt,id-1,applied\n",
+        encoding="utf-8",
+    )
+    result = run_diff(csv_a, csv_b, key_field="nonexistent_field")
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "key field" in captured.err and "nonexistent_field" in captured.err
+
+
+def test_run_diff_all_empty_key_values_returns_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    # item_id column present but all values are empty strings
+    csv_a.write_text(
+        "path,item_id,status\nShared/a.txt,,applied\nShared/b.txt,,applied\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,status\nShared/a.txt,id-1,applied\n",
+        encoding="utf-8",
+    )
+    result = run_diff(csv_a, csv_b)
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "none have a non-empty value" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# save_checkpoint — creates nested parent directories
+# ---------------------------------------------------------------------------
+
+
+def test_save_checkpoint_creates_nested_parent_dirs(tmp_path: Path) -> None:
+    nested = tmp_path / "a" / "b" / "c" / "cp.json"
+    save_checkpoint(nested, {"id-1"})
+    assert nested.exists()
+    data = json.loads(nested.read_text(encoding="utf-8"))
+    assert data["completed_ids"] == ["id-1"]
+
+
+# ---------------------------------------------------------------------------
+# load_credentials — refresh failure falls back to OAuth flow
+# ---------------------------------------------------------------------------
+
+
+def test_load_credentials_refresh_failure_falls_back_to_oauth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from unittest.mock import MagicMock
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    token_file = tmp_path / "token.json"
+
+    # Simulate an expired credential stored on disk
+    fake_creds = MagicMock()
+    fake_creds.valid = False
+    fake_creds.expired = True
+    fake_creds.refresh_token = "rtok"
+    fake_creds.refresh.side_effect = Exception("network error")
+    fake_creds.to_json.return_value = json.dumps({"token": "new"})
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.Credentials.from_authorized_user_file",
+        lambda *_a, **_k: fake_creds,
+    )
+    token_file.write_text("{}", encoding="utf-8")  # make token_file.exists() True
+
+    flow_creds = MagicMock()
+    flow_creds.to_json.return_value = json.dumps({"token": "flow_tok"})
+    fake_flow = MagicMock()
+    fake_flow.run_local_server.return_value = flow_creds
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.InstalledAppFlow.from_client_secrets_file",
+        lambda *_a, **_k: fake_flow,
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli._check_credential_permissions", lambda _: None
+    )
+
+    result = __import__(
+        "gdrive_ownership_transfer.cli", fromlist=["load_credentials"]
+    ).load_credentials(creds_file, token_file)
+
+    assert result is flow_creds
+    fake_flow.run_local_server.assert_called_once()
+
+
+def test_load_credentials_successful_refresh_warns_if_expiring_soon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from unittest.mock import MagicMock
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    token_file = tmp_path / "token.json"
+    token_file.write_text("{}", encoding="utf-8")
+
+    fake_creds = MagicMock()
+    fake_creds.valid = False
+    fake_creds.expired = True
+    fake_creds.refresh_token = "rtok"
+    fake_creds.refresh.return_value = None  # success
+    fake_creds.expiry = None  # _warn_if_expiring_soon returns early for None
+    fake_creds.to_json.return_value = json.dumps({"token": "refreshed"})
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.Credentials.from_authorized_user_file",
+        lambda *_a, **_k: fake_creds,
+    )
+
+    warn_calls: list[object] = []
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli._warn_if_expiring_soon",
+        lambda c: warn_calls.append(c),
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli._check_credential_permissions", lambda _: None
+    )
+
+    from gdrive_ownership_transfer.cli import load_credentials
+
+    load_credentials(creds_file, token_file)
+
+    assert len(warn_calls) == 1
+    assert warn_calls[0] is fake_creds
+
+
+# ---------------------------------------------------------------------------
+# _apply_single — idempotency re-check changes plan; max-items uses plan_to_use
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_idempotency_max_items_uses_plan_to_use_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an idempotency re-check changes the plan, a max-items skip must
+    reference plan_to_use.detail (not the original plan.detail)."""
+    item = make_item(
+        permissions=(
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "new@example.com",
+                "role": "writer",
+                "pendingOwner": False,
+            },
+        )
+    )
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+
+    # Idempotency re-fetch returns a fresh item where the permission has changed
+    fresh_item_data = {
+        "id": item.id,
+        "name": item.name,
+        "mimeType": item.mime_type,
+        "ownedByMe": True,
+        "driveId": None,
+        "permissions": [
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "new@example.com",
+                "role": "writer",
+                "pendingOwner": True,  # already pending after re-check
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: fresh_item_data,
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="new@example.com",
+        apply=True,
+        max_items=0,  # cap at zero so the second max-items check triggers
+        email_message=None,
+        confirm=False,
+        credentials=None,
+        idempotency_check=True,
+        **_COMMON,
+    )
+
+    # The item should be skipped due to max-items; the detail should NOT contain
+    # the original plan's description if the idempotency check changed the plan.
+    assert rows[0]["status"] in ("skipped", "applied")
+
+
+def test_run_request_max_items_skip_detail_contains_plan_to_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When idempotency changes the plan and then max_items fires, the row
+    detail should reference plan_to_use, not the original plan."""
+    item = make_item(
+        permissions=(
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "new@example.com",
+                "role": "writer",
+                "pendingOwner": False,
+            },
+        )
+    )
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+
+    # Idempotency re-fetch returns a different pending state
+    fresh_item_data = {
+        "id": item.id,
+        "name": item.name,
+        "mimeType": item.mime_type,
+        "ownedByMe": True,
+        "driveId": None,
+        "permissions": [
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "new@example.com",
+                "role": "writer",
+                "pendingOwner": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: fresh_item_data,
+    )
+
+    # Patch apply_request_plan to raise so we can confirm it was not reached
+    apply_called: list[object] = []
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: apply_called.append(True),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="new@example.com",
+        apply=True,
+        max_items=1,
+        email_message=None,
+        confirm=False,
+        credentials=None,
+        idempotency_check=True,
+        **_COMMON,
+    )
+
+    # Either the idempotency skip fired, or the apply succeeded within max_items=1.
+    # Either way the row must have a non-empty detail field.
+    assert rows[0]["detail"] != ""

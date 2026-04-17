@@ -537,6 +537,7 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
     if credentials and credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())
+            _warn_if_expiring_soon(credentials)
         except Exception:
             print(
                 f"Warning: failed to refresh token from {token_file} — re-authenticating.",
@@ -1032,7 +1033,7 @@ def _run_loop(  # noqa: C901
         with count_lock:
             if max_items is not None and attempted_ref[0] >= max_items:
                 row["status"] = "skipped"
-                row["detail"] = f"{plan.detail}; max-items reached"
+                row["detail"] = f"{plan_to_use.detail}; max-items reached"
                 if not quiet:
                     with print_lock:
                         print(f"[skip] {item.path} :: max-items reached", file=_out)
