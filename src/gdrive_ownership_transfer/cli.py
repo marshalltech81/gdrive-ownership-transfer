@@ -384,7 +384,7 @@ def main() -> int:  # noqa: C901
         return run_diff(args.csv_a, args.csv_b, key_field=args.key_field)
 
     if args.command == "revoke":
-        return run_auth_revoke(credentials_file=args.credentials_file, token_file=args.token_file)
+        return run_auth_revoke(token_file=args.token_file)
 
     if args.page_size < 1 or args.page_size > 1000:
         raise SystemExit("--page-size must be between 1 and 1000.")
@@ -1483,7 +1483,7 @@ def run_doctor(
     return 0
 
 
-def run_auth_revoke(*, credentials_file: Path, token_file: Path) -> int:
+def run_auth_revoke(*, token_file: Path) -> int:
     """Revoke the OAuth token at the provider and delete the local token file."""
     if not token_file.exists():
         print(f"No token file found at {token_file}.", file=sys.stderr)

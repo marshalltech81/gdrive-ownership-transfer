@@ -1592,7 +1592,6 @@ def test_run_diff_returns_error_for_missing_file(tmp_path: Path) -> None:
 
 def test_run_auth_revoke_missing_token_file(tmp_path: Path) -> None:
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=tmp_path / "no_token.json",
     )
     assert result == 1
@@ -1634,7 +1633,6 @@ def test_run_auth_revoke_deletes_token_file(
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _fake_urlopen)
 
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=token_file,
     )
     assert result == 0
@@ -2209,7 +2207,6 @@ def test_run_auth_revoke_handles_corrupt_token_file(
     )
 
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=token_file,
     )
     # Token unreadable → token=None → revoke skipped → file still deleted
@@ -2250,7 +2247,6 @@ def test_run_auth_revoke_handles_http_error_from_revoke(
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise_http)
 
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=token_file,
     )
     assert result == 0
@@ -2281,7 +2277,6 @@ def test_run_auth_revoke_handles_network_error(
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise)
 
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=token_file,
     )
     assert result == 0  # graceful
@@ -2568,7 +2563,6 @@ def test_run_auth_revoke_handles_unlink_error(
     monkeypatch.setattr(pathlib.Path, "unlink", _raise_oserror)
 
     result = run_auth_revoke(
-        credentials_file=tmp_path / "creds.json",
         token_file=token_file,
     )
     assert result == 0
