@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +14,13 @@ from gdrive_ownership_transfer.cli import (
     ActionPlan,
     ActionType,
     DriveItem,
+    TokenBucket,
     _apply_filters,
+    _check_credential_permissions,
+    _dict_to_drive_item,
+    _ensure_token_fresh,
+    _notify_webhook,
+    _print_diff_table,
     apply_accept_plan,
     apply_request_plan,
     execute_with_retries,
@@ -22,13 +30,18 @@ from gdrive_ownership_transfer.cli import (
     infer_target_email,
     is_retryable,
     list_children,
+    load_checkpoint,
     make_row,
     plan_accept,
     plan_request,
     print_summary,
     run_accept,
+    run_auth_revoke,
+    run_diff,
+    run_doctor,
     run_request,
     run_scan,
+    save_checkpoint,
     walk_tree,
     write_json_log,
     write_report,
@@ -1207,3 +1220,1236 @@ def test_apply_accept_plan_updates_owner_role() -> None:
 def test_apply_accept_plan_requires_permission_id() -> None:
     with pytest.raises(ValueError, match="permission id"):
         apply_accept_plan(FakeService(), make_item(), ActionPlan("accept-transfer", "accept"))
+
+
+# ---------------------------------------------------------------------------
+# TokenBucket
+# ---------------------------------------------------------------------------
+
+
+def test_token_bucket_does_not_sleep_when_tokens_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.time.sleep", lambda t: slept.append(t))
+    bucket = TokenBucket(10.0, per_seconds=100.0)
+    bucket.acquire()
+    assert not slept
+
+
+def test_token_bucket_sleeps_when_tokens_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.time.sleep", lambda t: slept.append(t))
+    # Rate=1 per 100s — first acquire is free; second must wait ~100s
+    bucket = TokenBucket(1.0, per_seconds=100.0)
+    bucket.acquire()  # uses the pre-filled token
+    bucket.acquire()  # no tokens left → must sleep
+    assert slept and slept[0] > 0
+
+
+def test_token_bucket_is_thread_safe() -> None:
+    import threading as _threading
+
+    acquired: list[int] = []
+    bucket = TokenBucket(1000.0, per_seconds=100.0)
+
+    def _worker() -> None:
+        bucket.acquire()
+        acquired.append(1)
+
+    threads = [_threading.Thread(target=_worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(acquired) == 20
+
+
+# ---------------------------------------------------------------------------
+# load_checkpoint / save_checkpoint
+# ---------------------------------------------------------------------------
+
+
+def test_load_checkpoint_returns_empty_set_for_missing_file(tmp_path: Path) -> None:
+    assert load_checkpoint(tmp_path / "nope.json") == set()
+
+
+def test_load_checkpoint_reads_completed_ids(tmp_path: Path) -> None:
+    p = tmp_path / "cp.json"
+    p.write_text('{"completed_ids": ["id-1", "id-2"]}', encoding="utf-8")
+    assert load_checkpoint(p) == {"id-1", "id-2"}
+
+
+def test_load_checkpoint_handles_corrupt_file(tmp_path: Path) -> None:
+    p = tmp_path / "cp.json"
+    p.write_text("not-json", encoding="utf-8")
+    assert load_checkpoint(p) == set()
+
+
+def test_save_checkpoint_writes_sorted_ids(tmp_path: Path) -> None:
+    p = tmp_path / "cp.json"
+    save_checkpoint(p, {"z-id", "a-id"})
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["completed_ids"] == ["a-id", "z-id"]
+
+
+# ---------------------------------------------------------------------------
+# _apply_filters — exclude params
+# ---------------------------------------------------------------------------
+
+
+def test_apply_filters_exclude_mime_type() -> None:
+    doc = make_item(mime_type="application/vnd.google-apps.document")
+    sheet = make_item(mime_type="application/vnd.google-apps.spreadsheet")
+    result = _apply_filters(
+        [doc, sheet],
+        mime_types=None,
+        path_prefix=None,
+        exclude_mime_types=["application/vnd.google-apps.spreadsheet"],
+    )
+    assert result == [doc]
+
+
+def test_apply_filters_exclude_path_prefix() -> None:
+    inside = make_item(path="Shared/Archive/old.txt")
+    outside = make_item(path="Shared/Docs/new.txt")
+    result = _apply_filters(
+        [inside, outside],
+        mime_types=None,
+        path_prefix=None,
+        exclude_path_prefix="Shared/Archive",
+    )
+    assert result == [outside]
+
+
+def test_apply_filters_exclude_and_include_combined() -> None:
+    match = make_item(path="Shared/Docs/file.txt", mime_type="text/plain")
+    excluded_path = make_item(path="Shared/Archive/file.txt", mime_type="text/plain")
+    excluded_mime = make_item(
+        path="Shared/Docs/sheet", mime_type="application/vnd.google-apps.spreadsheet"
+    )
+    result = _apply_filters(
+        [match, excluded_path, excluded_mime],
+        mime_types=["text/plain"],
+        path_prefix=None,
+        exclude_path_prefix="Shared/Archive",
+    )
+    assert result == [match]
+
+
+# ---------------------------------------------------------------------------
+# _dict_to_drive_item
+# ---------------------------------------------------------------------------
+
+
+def test_dict_to_drive_item_maps_fields() -> None:
+    data: dict[str, object] = {
+        "id": "x",
+        "name": "MyFile",
+        "mimeType": "text/plain",
+        "ownedByMe": True,
+        "driveId": None,
+        "permissions": [],
+    }
+    item = _dict_to_drive_item(data, "Root/MyFile")  # type: ignore[arg-type]
+    assert item.id == "x"
+    assert item.path == "Root/MyFile"
+    assert item.owned_by_me is True
+
+
+# ---------------------------------------------------------------------------
+# plan_request — conflict detection
+# ---------------------------------------------------------------------------
+
+
+def test_plan_request_skips_conflicting_pending_transfer() -> None:
+    item = make_item(
+        permissions=(
+            {
+                "id": "perm-other",
+                "type": "user",
+                "emailAddress": "other@example.com",
+                "role": "writer",
+                "pendingOwner": True,
+            },
+        )
+    )
+    plan = plan_request(item, "target@example.com")
+    assert plan.action == "skip"
+    assert "conflict" in plan.detail
+    assert "other@example.com" in plan.detail
+
+
+def test_plan_request_no_conflict_when_pending_is_same_target() -> None:
+    item = make_item(
+        permissions=(
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "target@example.com",
+                "role": "writer",
+                "pendingOwner": True,
+            },
+        )
+    )
+    plan = plan_request(item, "target@example.com")
+    assert plan.action == "skip"
+    assert plan.detail == "ownership transfer is already pending"
+
+
+# ---------------------------------------------------------------------------
+# run_request / run_accept — new params (exclude, checkpoint, dry_run_diff)
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_exclude_mime_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = make_item(mime_type="application/vnd.google-apps.document")
+    sheet = make_item(mime_type="application/vnd.google-apps.spreadsheet")
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [doc, sheet])
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=False,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        exclude_mime_types=["application/vnd.google-apps.spreadsheet"],
+        **_COMMON,
+    )
+    assert len(rows) == 1
+    assert rows[0]["mime_type"] == "application/vnd.google-apps.document"
+
+
+def test_run_request_exclude_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    active = make_item(path="Shared/Docs/file.txt")
+    archived = make_item(path="Shared/Archive/old.txt")
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [active, archived]
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=False,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        exclude_path_prefix="Shared/Archive",
+        **_COMMON,
+    )
+    assert len(rows) == 1
+    assert rows[0]["path"] == "Shared/Docs/file.txt"
+
+
+def test_run_request_resume_skips_checkpointed_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    item_a = make_item(path="Shared/a.txt")
+    item_b = DriveItem(
+        id="item-456",
+        name="b.txt",
+        mime_type="text/plain",
+        path="Shared/b.txt",
+        owned_by_me=True,
+        drive_id=None,
+        permissions=(),
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item_a, item_b]
+    )
+    cp = tmp_path / "cp.json"
+    save_checkpoint(cp, {"item-123"})  # item_a.id == "item-123"
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=False,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        checkpoint_file=cp,
+        **_COMMON,
+    )
+    # Only item_b should appear (item_a was checkpointed out)
+    assert all(r["path"] != "Shared/a.txt" for r in rows)
+    assert any(r["path"] == "Shared/b.txt" for r in rows)
+
+
+def test_run_request_dry_run_diff_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = make_item()
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=False,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        dry_run_diff=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "dry-run"
+
+
+def test_run_accept_resume_skips_checkpointed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [_pending_item()]
+    )
+    cp = tmp_path / "cp.json"
+    save_checkpoint(cp, {"item-123"})  # _pending_item uses id="item-123"
+
+    rows = run_accept(
+        object(),
+        {},
+        recipient_email="recipient@example.com",
+        apply=False,
+        max_items=None,
+        confirm=False,
+        checkpoint_file=cp,
+        **_COMMON,
+    )
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# _print_diff_table
+# ---------------------------------------------------------------------------
+
+
+def test_print_diff_table_shows_actionable_items(capsys: pytest.CaptureFixture[str]) -> None:
+    item = make_item()
+    planned = [(item, ActionPlan("create-permission", "create writer permission"))]
+    _print_diff_table(planned, sys.stdout)
+    captured = capsys.readouterr()
+    assert "create-permission" in captured.out
+    assert item.path in captured.out
+
+
+def test_print_diff_table_skips_skip_actions(capsys: pytest.CaptureFixture[str]) -> None:
+    item = make_item(owned_by_me=False)
+    planned = [(item, ActionPlan("skip", "not owned"))]
+    _print_diff_table(planned, sys.stdout)
+    captured = capsys.readouterr()
+    assert "no actionable items" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# run_diff
+# ---------------------------------------------------------------------------
+
+
+def test_run_diff_reports_missing_items(tmp_path: Path) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    csv_a.write_text(
+        "path,item_id,mime_type,action,status,detail\n"
+        "Shared/a.txt,id-1,text/plain,request,applied,\n"
+        "Shared/b.txt,id-2,text/plain,request,applied,\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,mime_type,action,status,detail\n"
+        "Shared/a.txt,id-1,text/plain,accept,applied,\n",
+        encoding="utf-8",
+    )
+    result = run_diff(csv_a, csv_b)
+    assert result == 1
+
+
+def test_run_diff_returns_zero_when_all_present(tmp_path: Path) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    csv_a.write_text(
+        "path,item_id,mime_type,action,status,detail\n"
+        "Shared/a.txt,id-1,text/plain,request,applied,\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,mime_type,action,status,detail\n"
+        "Shared/a.txt,id-1,text/plain,accept,applied,\n",
+        encoding="utf-8",
+    )
+    assert run_diff(csv_a, csv_b) == 0
+
+
+def test_run_diff_returns_error_for_missing_file(tmp_path: Path) -> None:
+    result = run_diff(tmp_path / "missing.csv", tmp_path / "also_missing.csv")
+    assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# run_auth_revoke
+# ---------------------------------------------------------------------------
+
+
+def test_run_auth_revoke_missing_token_file(tmp_path: Path) -> None:
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=tmp_path / "no_token.json",
+    )
+    assert result == 1
+
+
+def test_run_auth_revoke_deletes_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "access-token",
+                "refresh_token": "refresh-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "client-id",
+                "client_secret": "client-secret",  # pragma: allowlist secret
+                "scopes": ["https://www.googleapis.com/auth/drive"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    urlopen_calls: list[str] = []
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    def _fake_urlopen(req: object, timeout: int = 10) -> _FakeResp:
+        urlopen_calls.append("called")
+        return _FakeResp()
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _fake_urlopen)
+
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=token_file,
+    )
+    assert result == 0
+    assert not token_file.exists()
+    assert urlopen_calls
+
+
+# ---------------------------------------------------------------------------
+# _notify_webhook
+# ---------------------------------------------------------------------------
+
+
+def test_notify_webhook_posts_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted: list[bytes] = []
+
+    class _FakeResp:
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    def _fake_urlopen(req: object, timeout: int = 10) -> _FakeResp:
+        posted.append(req.data)  # type: ignore[union-attr]
+        return _FakeResp()
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _fake_urlopen)
+
+    rows = [make_row(make_item(), action="scan", status="applied", detail="")]
+    _notify_webhook("https://hook.example.com/test", rows, command="scan")
+
+    assert posted
+    payload = json.loads(posted[0])
+    assert payload["command"] == "scan"
+    assert payload["item_count"] == 1
+    assert "applied" in payload["status_counts"]
+
+
+def test_notify_webhook_handles_failure_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*_: object, **__: object) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise)
+    # Should not raise
+    _notify_webhook("https://hook.example.com/test", [], command="scan")
+
+
+# ---------------------------------------------------------------------------
+# _check_credential_permissions
+# ---------------------------------------------------------------------------
+
+
+def test_check_credential_permissions_warns_on_world_readable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text("{}", encoding="utf-8")
+    import os as _os
+
+    _os.chmod(cred_file, 0o644)  # world-readable
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.os.name", "posix")
+    _check_credential_permissions(cred_file)
+    assert "Warning" in capsys.readouterr().err
+
+
+def test_check_credential_permissions_silent_on_secure_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text("{}", encoding="utf-8")
+    import os as _os
+
+    _os.chmod(cred_file, 0o600)  # owner only
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.os.name", "posix")
+    _check_credential_permissions(cred_file)
+    assert capsys.readouterr().err == ""
+
+
+def test_check_credential_permissions_skips_on_non_posix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.os.name", "nt")
+    _check_credential_permissions(tmp_path / "credentials.json")
+    assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------
+# _ensure_token_fresh
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_token_fresh_refreshes_near_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    refreshed: list[bool] = []
+
+    creds = SimpleNamespace(
+        expiry=datetime.now(UTC) + timedelta(seconds=10),
+        refresh_token="rt",
+        refresh=lambda req: refreshed.append(True),
+    )
+    _ensure_token_fresh(creds)  # type: ignore[arg-type]
+    assert refreshed
+
+
+def test_ensure_token_fresh_does_not_refresh_with_plenty_of_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    refreshed: list[bool] = []
+
+    creds = SimpleNamespace(
+        expiry=datetime.now(UTC) + timedelta(seconds=3600),
+        refresh_token="rt",
+        refresh=lambda req: refreshed.append(True),
+    )
+    _ensure_token_fresh(creds)  # type: ignore[arg-type]
+    assert not refreshed
+
+
+def test_ensure_token_fresh_ignores_missing_expiry() -> None:
+    from types import SimpleNamespace
+
+    creds = SimpleNamespace(expiry=None)
+    _ensure_token_fresh(creds)  # type: ignore[arg-type] — should not raise
+
+
+# ---------------------------------------------------------------------------
+# run_doctor
+# ---------------------------------------------------------------------------
+
+
+class FakeAboutApi:
+    def __init__(self, email: str = "me@example.com") -> None:
+        self.email = email
+
+    def get(self, fields: str = "") -> FakeRequest:
+        return FakeRequest({"user": {"emailAddress": self.email, "displayName": "Me"}})
+
+
+class FakeServiceWithAbout(FakeService):
+    def __init__(self, *, email: str = "me@example.com", **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._about_api = FakeAboutApi(email)
+
+    def about(self) -> FakeAboutApi:
+        return self._about_api
+
+
+def test_run_doctor_passes_all_checks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text("{}", encoding="utf-8")
+    token_file = tmp_path / "token.json"
+    token_file.write_text("{}", encoding="utf-8")
+    import os as _os
+
+    _os.chmod(cred_file, 0o600)
+    _os.chmod(token_file, 0o600)
+
+    creds = SimpleNamespace(valid=True, expired=False)
+
+    folder_data = {
+        "id": "folder-1",
+        "name": "Shared",
+        "mimeType": "application/vnd.google-apps.folder",
+        "driveId": None,
+    }
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: folder_data,
+    )
+
+    service = FakeServiceWithAbout()
+    result = run_doctor(
+        service,  # type: ignore[arg-type]
+        creds,  # type: ignore[arg-type]
+        credentials_file=cred_file,
+        token_file=token_file,
+        folder_id="folder-1",
+    )
+    assert result == 0
+
+
+def test_run_doctor_fails_on_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    creds = SimpleNamespace(valid=False, expired=True)
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: {
+            "id": "f",
+            "name": "F",
+            "mimeType": "application/vnd.google-apps.folder",
+        },
+    )
+
+    service = FakeServiceWithAbout()
+    result = run_doctor(
+        service,  # type: ignore[arg-type]
+        creds,  # type: ignore[arg-type]
+        credentials_file=tmp_path / "missing.json",  # does not exist
+        token_file=tmp_path / "token.json",
+        folder_id="folder-1",
+    )
+    assert result == 1
+
+
+def test_run_doctor_fails_when_api_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    creds = SimpleNamespace(valid=True, expired=False)
+
+    def _raise(*_a: object, **_k: object) -> None:
+        raise OSError("network error")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.execute_with_retries", _raise)
+
+    result = run_doctor(
+        FakeServiceWithAbout(),  # type: ignore[arg-type]
+        creds,  # type: ignore[arg-type]
+        credentials_file=tmp_path / "creds.json",
+        token_file=tmp_path / "token.json",
+        folder_id="folder-1",
+    )
+    assert result == 1
+
+
+def test_run_doctor_warns_on_shared_drive_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    creds = SimpleNamespace(valid=True, expired=False)
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: {
+            "id": "f",
+            "name": "SharedDrive",
+            "mimeType": "application/vnd.google-apps.folder",
+            "driveId": "drive-123",
+        },
+    )
+    result = run_doctor(
+        FakeServiceWithAbout(),  # type: ignore[arg-type]
+        creds,  # type: ignore[arg-type]
+        credentials_file=tmp_path / "creds.json",
+        token_file=tmp_path / "token.json",
+        folder_id="f",
+    )
+    assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# run_diff — status_only path
+# ---------------------------------------------------------------------------
+
+
+def test_run_diff_reports_status_changes(tmp_path: Path) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    csv_a.write_text(
+        "path,item_id,mime_type,action,status,detail\n"
+        "Shared/a.txt,id-1,text/plain,request,applied,\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,mime_type,action,status,detail\nShared/a.txt,id-1,text/plain,accept,error,\n",
+        encoding="utf-8",
+    )
+    # id-1 is present in both but status differs → status_only → returns 0 (item not missing)
+    result = run_diff(csv_a, csv_b)
+    assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — concurrency path
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_concurrency_applies_all_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [
+        DriveItem(
+            id=f"id-{i}",
+            name=f"f{i}",
+            mime_type="text/plain",
+            path=f"Shared/f{i}",
+            owned_by_me=True,
+            drive_id=None,
+            permissions=(),
+        )
+        for i in range(3)
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: items)
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        concurrency=2,
+        **_COMMON,
+    )
+    assert len(rows) == 3
+    assert all(r["status"] == "applied" for r in rows)
+    assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — interactive mode
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_interactive_skips_on_n(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = make_item()
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr("gdrive_ownership_transfer.cli._RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        interactive=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "skipped"
+    assert "interactively" in rows[0]["detail"]
+
+
+def test_run_request_interactive_applies_on_y(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = make_item()
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr("gdrive_ownership_transfer.cli._RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda: "y")
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        interactive=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "applied"
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — idempotency_check path
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_idempotency_skips_already_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    item = make_item()
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    # Simulate re-fetch showing target is already owner
+    already_owner_item = make_item(
+        permissions=(
+            {
+                "id": "perm-1",
+                "type": "user",
+                "emailAddress": "owner@example.com",
+                "role": "owner",
+            },
+        )
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: {
+            "id": already_owner_item.id,
+            "name": already_owner_item.name,
+            "mimeType": already_owner_item.mime_type,
+            "ownedByMe": already_owner_item.owned_by_me,
+            "driveId": already_owner_item.drive_id,
+            "permissions": list(already_owner_item.permissions),
+        },
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        idempotency_check=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "skipped"
+    assert "idempotency" in rows[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# main() — diff and revoke subcommands
+# ---------------------------------------------------------------------------
+
+
+def test_main_diff_subcommand(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    csv_a.write_text(
+        "path,item_id,mime_type,action,status,detail\nShared/a.txt,id-1,text/plain,request,applied,\n",
+        encoding="utf-8",
+    )
+    csv_b.write_text(
+        "path,item_id,mime_type,action,status,detail\nShared/a.txt,id-1,text/plain,accept,applied,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["gdrive-ownership-transfer", "diff", "--csv-a", str(csv_a), "--csv-b", str(csv_b)],
+    )
+    result = main()
+    assert result == 0
+
+
+def test_main_revoke_missing_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "revoke",
+            "--token-file",
+            str(tmp_path / "no_token.json"),
+            "--credentials-file",
+            str(tmp_path / "creds.json"),
+        ],
+    )
+    result = main()
+    assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# run_diff — csv_b missing (not csv_a)
+# ---------------------------------------------------------------------------
+
+
+def test_run_diff_csv_b_missing(tmp_path: Path) -> None:
+    csv_a = tmp_path / "a.csv"
+    csv_a.write_text(
+        "path,item_id,mime_type,action,status,detail\nShared/a.txt,id-1,text/plain,req,applied,\n",
+        encoding="utf-8",
+    )
+    result = run_diff(csv_a, tmp_path / "missing.csv")
+    assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# run_auth_revoke — corrupt token file and HTTPError paths
+# ---------------------------------------------------------------------------
+
+
+def test_run_auth_revoke_handles_corrupt_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_file = tmp_path / "bad_token.json"
+    token_file.write_text("not-valid-json", encoding="utf-8")
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.urllib.request.urlopen",
+        lambda *_a, **_k: _FakeResp(),
+    )
+
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=token_file,
+    )
+    # Token unreadable → token=None → revoke skipped → file still deleted
+    assert result == 0
+    assert not token_file.exists()
+
+
+def test_run_auth_revoke_handles_http_error_from_revoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "tok",
+                "refresh_token": "rtok",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "cid",
+                "client_secret": "csecret",  # pragma: allowlist secret
+                "scopes": ["https://www.googleapis.com/auth/drive"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import urllib.error as _uerr
+    from types import SimpleNamespace
+
+    def _raise_http(*_a: object, **_k: object) -> None:
+        raise _uerr.HTTPError(
+            url="",
+            code=400,
+            msg="Bad Request",
+            hdrs=SimpleNamespace(),
+            fp=None,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise_http)
+
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=token_file,
+    )
+    assert result == 0
+    assert not token_file.exists()
+
+
+def test_run_auth_revoke_handles_network_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "tok",
+                "refresh_token": "rtok",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "scopes": ["https://www.googleapis.com/auth/drive"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _raise(*_a: object, **_k: object) -> None:
+        raise OSError("network down")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise)
+
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=token_file,
+    )
+    assert result == 0  # graceful
+    assert not token_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# run_request — checkpoint_file saves on success
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_checkpoint_saves_applied_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    item = make_item()
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+    cp = tmp_path / "cp.json"
+
+    run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        checkpoint_file=cp,
+        **_COMMON,
+    )
+    assert cp.exists()
+    data = json.loads(cp.read_text(encoding="utf-8"))
+    assert "item-123" in data["completed_ids"]
+
+
+# ---------------------------------------------------------------------------
+# plan_accept — no-pending path (line 1283)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_accept_skips_writer_without_pending() -> None:
+    item = make_item(
+        permissions=(
+            {
+                "id": "perm-2",
+                "type": "user",
+                "emailAddress": "recipient@example.com",
+                "role": "writer",
+                "pendingOwner": False,
+            },
+        )
+    )
+    plan = plan_accept(item, "recipient@example.com")
+    assert plan.action == "skip"
+    assert "no pending" in plan.detail
+
+
+# ---------------------------------------------------------------------------
+# main() — validation paths
+# ---------------------------------------------------------------------------
+
+
+def test_main_rejects_invalid_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "request",
+            "--folder-id",
+            "folder-1",
+            "--credentials-file",
+            str(creds_file),
+            "--concurrency",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit, match="concurrency"):
+        main()
+
+
+def test_main_rejects_interactive_with_concurrency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "request",
+            "--folder-id",
+            "folder-1",
+            "--credentials-file",
+            str(creds_file),
+            "--concurrency",
+            "2",
+            "--interactive",
+        ],
+    )
+    with pytest.raises(SystemExit, match="interactive"):
+        main()
+
+
+def test_main_rejects_invalid_rate_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "request",
+            "--folder-id",
+            "folder-1",
+            "--credentials-file",
+            str(creds_file),
+            "--rate-limit",
+            "-1",
+        ],
+    )
+    with pytest.raises(SystemExit, match="rate-limit"):
+        main()
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — concurrent exception path (future raises unexpectedly)
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_concurrency_handles_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = make_item()
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+
+    def _explode(*_a: object, **_k: object) -> None:
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.apply_request_plan", _explode)
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        concurrency=2,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "error"
+    assert "unexpected boom" in rows[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# run_doctor — token file with specific permission states
+# ---------------------------------------------------------------------------
+
+
+def test_run_doctor_warns_on_insecure_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import os as _os
+    from types import SimpleNamespace
+
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text("{}", encoding="utf-8")
+    _os.chmod(cred_file, 0o600)
+
+    token_file = tmp_path / "token.json"
+    token_file.write_text("{}", encoding="utf-8")
+    _os.chmod(token_file, 0o644)  # world-readable → insecure
+
+    creds = SimpleNamespace(valid=True, expired=False)
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: {
+            "id": "f",
+            "name": "F",
+            "mimeType": "application/vnd.google-apps.folder",
+        },
+    )
+
+    result = run_doctor(
+        FakeServiceWithAbout(),  # type: ignore[arg-type]
+        creds,  # type: ignore[arg-type]
+        credentials_file=cred_file,
+        token_file=token_file,
+        folder_id="f",
+    )
+    assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — quiet suppresses max-items skip message
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_max_items_quiet_suppresses_skip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    items = [make_item(path="Shared/one"), make_item(path="Shared/two")]
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: items)
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=1,
+        email_message=None,
+        confirm=False,
+        page_size=100,
+        quiet=True,
+        output_format="text",
+        mime_types=None,
+        path_prefix=None,
+    )
+    captured = capsys.readouterr()
+    assert "max-items reached" not in captured.out
+    assert [r["status"] for r in rows] == ["applied", "skipped"]

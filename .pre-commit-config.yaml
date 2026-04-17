@@ -74,4 +74,3 @@ repos:
         stages:
           - commit-msg
         pass_filenames: true
-

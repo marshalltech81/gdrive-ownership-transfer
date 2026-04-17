@@ -46,13 +46,30 @@ uv sync --dev
 
 This repository is `uv`-first and includes a committed `uv.lock`. The local Python version is pinned in [.python-version](.python-version).
 
+### Optional extras
+
+Install `rich` for a progress bar and color output:
+
+```bash
+pip install gdrive-ownership-transfer[rich]
+```
+
+Install OpenTelemetry support for distributed tracing:
+
+```bash
+pip install gdrive-ownership-transfer[otel]
+```
+
 ## Usage
 
-The CLI has three subcommands:
+The CLI has six subcommands:
 
 - `scan`: walk the folder tree and show which items are owned by the authenticated user
 - `request`: initiate ownership-transfer requests for the items the authenticated user owns
 - `accept`: accept pending ownership-transfer requests as the recipient
+- `diff`: compare two CSV report files and show what changed
+- `revoke`: revoke the stored OAuth token and delete the token file
+- `doctor`: run diagnostic checks against credentials, token, Drive API, and folder access
 
 ### 1. Scan the folder tree
 
@@ -105,25 +122,67 @@ uv run gdrive-ownership-transfer accept \
   --report-file accept-report.csv
 ```
 
+### 4. Compare two report CSVs
+
+```bash
+uv run gdrive-ownership-transfer diff before.csv after.csv
+```
+
+Pass `--key-field name` to diff on a different column (default: `item_id`).
+
+### 5. Revoke the stored OAuth token
+
+```bash
+uv run gdrive-ownership-transfer revoke \
+  --credentials-file credentials.json \
+  --token-file .tokens/token.json
+```
+
+### 6. Run diagnostics
+
+```bash
+uv run gdrive-ownership-transfer doctor \
+  --folder-id YOUR_SHARED_FOLDER_ID \
+  --credentials-file credentials.json
+```
+
+`doctor` exits non-zero if any check fails. Use it to confirm your setup before a bulk run.
+
 ## Common flags
 
-All three subcommands accept these optional flags:
+All six subcommands accept these optional flags:
 
 | Flag | Description |
 |------|-------------|
 | `--filter-mime-type MIME_TYPE` | Only process items of this MIME type. Repeat to allow multiple types. |
 | `--filter-path PREFIX` | Only process items whose path starts with `PREFIX`. |
+| `--exclude-mime-type MIME_TYPE` | Skip items of this MIME type. Repeat to exclude multiple types. |
+| `--exclude-path PREFIX` | Skip items whose path starts with `PREFIX`. |
 | `--output-format {text,json}` | Output format. `json` prints a JSON array to stdout; metadata goes to stderr. Default: `text`. |
 | `--log-file PATH` | Write a structured JSON audit log to this path in addition to the normal report. |
 | `--quiet` | Suppress skipped-item lines; show only applied changes and errors. |
 | `--page-size N` | Number of Drive API results per page (default: 100). |
 | `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/token.json`). |
+| `--rate-limit N` | Maximum Drive API calls per 100 seconds (default: 100). |
+| `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `[otel]` extra). |
+| `--notify-webhook URL` | POST a JSON run summary to this URL after the run completes. |
 
 `request` and `accept` also accept:
 
 | Flag | Description |
 |------|-------------|
 | `--confirm` | Prompt for confirmation before applying any changes. |
+| `--concurrency N` | Number of parallel Drive API calls (default: 1). |
+| `--checkpoint-file PATH` | JSON file to store completed item IDs for resuming an interrupted run. |
+| `--dry-run-diff` | Print a table of planned changes before applying. |
+| `--interactive` | Prompt for confirmation on each item individually. |
+| `--idempotency-check` | Re-fetch each item from the API before applying to avoid duplicate mutations. |
+
+`diff` also accepts:
+
+| Flag | Description |
+|------|-------------|
+| `--key-field FIELD` | CSV column to use as the join key (default: `item_id`). |
 
 Global flag:
 
@@ -142,6 +201,11 @@ Global flag:
 - Pass `--confirm` to require interactive confirmation before any changes are applied.
 - Use `--output-format json` to pipe structured output into other tools; progress messages go to stderr.
 - Use `--log-file` to write a timestamped JSON audit log in addition to a CSV report.
+- Use `--checkpoint-file` to resume an interrupted bulk run; completed item IDs are saved after each successful apply.
+- Use `--concurrency N` to parallelize Drive API calls when processing large folder trees.
+- Use `--dry-run-diff` to preview every planned change as an ASCII table before committing.
+- Use `--notify-webhook` to receive a JSON summary POST at the end of a run (for CI or alerting pipelines).
+- Use `--rate-limit` to stay within Drive API quota on large runs.
 
 ## Troubleshooting
 
@@ -155,6 +219,8 @@ Global flag:
   This tool only supports items in My Drive. Google does not support ownership transfer for shared-drive items.
 - A transferred folder did not transfer its contents:
   That is expected Google behavior. Ownership must be transferred item by item, which is why the tool walks the full tree recursively.
+- `doctor` reports a credential permission warning:
+  Your credentials file is world-readable. Run `chmod 600 credentials.json` to restrict access.
 
 ## Development
 
@@ -168,6 +234,12 @@ uv run mypy src
 uv run pytest
 uv run bandit -q -r src
 uv build
+```
+
+Run the nox session matrix (lint, format, typecheck, tests, bandit):
+
+```bash
+uv run nox
 ```
 
 If you use pre-commit locally:
@@ -213,6 +285,8 @@ The repository includes:
 
 - `CI`: workflow linting, Conventional Commit validation, linting, formatting, typing, tests, CLI smoke checks, and package builds
 - `Security`: `bandit` and `pip-audit` on `main`, on a weekly schedule, and on manual dispatch
+- `Publish`: build Python distributions and publish to PyPI; build and push Docker image to GHCR on version tags
+- `Release Notes`: auto-generate GitHub Release notes on version tags
 - `Dependabot`: weekly grouped updates for `uv` dependencies and GitHub Actions
 
 ## Project Layout
@@ -220,6 +294,9 @@ The repository includes:
 - `src/gdrive_ownership_transfer/`: package source
 - `scripts/`: local repository automation helpers
 - `tests/`: unit tests
+- `noxfile.py`: nox session matrix
+- `Dockerfile`: container image definition
+- `demo.tape`: VHS tape script for animated terminal demo
 - `AGENTS.md`: repository guidance for contributors and coding agents
 - `CONTRIBUTING.md`: contributor workflow and commit conventions
 

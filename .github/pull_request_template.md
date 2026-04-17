@@ -18,4 +18,3 @@ Use a title such as:
 - `feat: add recursive transfer planning`
 - `fix: reject shared-drive ownership transfer`
 - `chore(ci): add security workflow`
-

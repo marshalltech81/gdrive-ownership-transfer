@@ -46,4 +46,3 @@ Follow the repository's lowercase Conventional Commit style:
 ## Reporting security issues
 
 Do not open public issues for vulnerabilities. Use the private reporting flow in [SECURITY.md](SECURITY.md).
-

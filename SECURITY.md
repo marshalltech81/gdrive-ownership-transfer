@@ -30,4 +30,3 @@ Security reports are especially helpful for:
 ## Disclosure
 
 Please allow time for investigation and remediation before public disclosure.
-
