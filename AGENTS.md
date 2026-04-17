@@ -19,7 +19,7 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - Treat Google Drive API limitations as product constraints, not bugs to paper over.
 - Prefer small, testable functions around planning, filtering, and reporting logic.
 - Keep dependencies lean and avoid adding heavy frameworks for a small CLI utility.
-- Optional extras (`rich`, `otel`) are soft dependencies — the tool must work without them installed.
+- Optional features (`rich`, `otel`) are soft dependencies gated behind `try/except ImportError` — the tool must work without them installed.
 
 ## Current Architecture
 
@@ -45,8 +45,6 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 
 - `.github/workflows/ci.yml`: lint, type-check, tests, build, and Conventional Commit validation
 - `.github/workflows/security.yml`: Bandit and dependency audit checks
-- `.github/workflows/publish.yml`: build Python distributions and publish to PyPI on version tags
-- `.github/workflows/release.yml`: auto-generate GitHub Release notes on version tags
 - `.github/dependabot.yml`: automated dependency and GitHub Actions update policy
 - `SECURITY.md`: coordinated disclosure guidance
 - `CONTRIBUTING.md`: contributor workflow and recommended local checks
@@ -181,4 +179,4 @@ Changes are expected to keep these checks green:
 - Avoid hard-coding account-specific values beyond examples and placeholders in docs.
 - Document any new CLI flag in `README.md`.
 - Do not silently skip unsupported Drive cases.
-- When adding optional features that require third-party packages, gate them behind a `try/except ImportError` and add the package to `[project.optional-dependencies]` in `pyproject.toml`.
+- When adding optional features that require third-party packages, gate them behind a `try/except ImportError` and add the package to the `dev` dependency group in `pyproject.toml` so contributors can install it locally.

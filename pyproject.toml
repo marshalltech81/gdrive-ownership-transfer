@@ -13,20 +13,6 @@ dependencies = [
   "google-auth-oauthlib>=1.2.1",
 ]
 
-[project.optional-dependencies]
-rich = [
-  "rich>=13.0",
-]
-otel = [
-  "opentelemetry-api>=1.25.0",
-  "opentelemetry-sdk>=1.25.0",
-  "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/marshalltech81/gdrive-ownership-transfer"
-Issues = "https://github.com/marshalltech81/gdrive-ownership-transfer/issues"
-
 [dependency-groups]
 dev = [
   "bandit[toml]>=1.9.4",

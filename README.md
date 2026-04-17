@@ -35,6 +35,8 @@ Google references:
 ## Install
 
 ```bash
+git clone https://github.com/marshalltech81/gdrive-ownership-transfer
+cd gdrive-ownership-transfer
 uv sync
 ```
 
@@ -45,20 +47,6 @@ uv sync --dev
 ```
 
 This repository is `uv`-first and includes a committed `uv.lock`. The local Python version is pinned in [.python-version](.python-version).
-
-### Optional extras
-
-Install `rich` for a progress bar and color output:
-
-```bash
-pip install gdrive-ownership-transfer[rich]
-```
-
-Install OpenTelemetry support for distributed tracing:
-
-```bash
-pip install gdrive-ownership-transfer[otel]
-```
 
 ## Usage
 
@@ -164,7 +152,7 @@ All six subcommands accept these optional flags:
 | `--page-size N` | Number of Drive API results per page (default: 100). |
 | `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/token.json`). |
 | `--rate-limit N` | Maximum Drive API calls per 100 seconds (default: 100). |
-| `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `[otel]` extra). |
+| `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `opentelemetry-*` packages). |
 | `--notify-webhook URL` | POST a JSON run summary to this URL after the run completes. |
 
 `request` and `accept` also accept:
@@ -285,8 +273,6 @@ The repository includes:
 
 - `CI`: workflow linting, Conventional Commit validation, linting, formatting, typing, tests, CLI smoke checks, and package builds
 - `Security`: `bandit` and `pip-audit` on `main`, on a weekly schedule, and on manual dispatch
-- `Publish`: build Python distributions and publish to PyPI on version tags
-- `Release Notes`: auto-generate GitHub Release notes on version tags
 - `Dependabot`: weekly grouped updates for `uv` dependencies and GitHub Actions
 
 ## Project Layout
