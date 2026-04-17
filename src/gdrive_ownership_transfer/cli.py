@@ -100,6 +100,8 @@ class TokenBucket:
     """Thread-safe token bucket for proactive Drive API rate limiting."""
 
     def __init__(self, rate: float, per_seconds: float = 100.0) -> None:
+        if rate <= 0:
+            raise ValueError(f"TokenBucket rate must be positive, got {rate!r}")
         self._rate = rate
         self._per_seconds = per_seconds
         # Capacity is at least 1 so fractional rates (e.g. 0.5 req/100s) can
@@ -1259,7 +1261,7 @@ def plan_request(item: DriveItem, target_email: str) -> ActionPlan:
         for p in item.permissions
         if p.get("type") == "user"
         and p.get("pendingOwner")
-        and p.get("emailAddress", "").casefold() != target_email.casefold()
+        and str(p.get("emailAddress") or "").casefold() != target_email.casefold()
     ]
     if other_pending:
         conflict_email = other_pending[0].get("emailAddress", "unknown")
@@ -1598,7 +1600,7 @@ def find_user_permission(
     for permission in permissions:
         if permission.get("type") != "user":
             continue
-        if permission.get("emailAddress", "").casefold() == normalized:
+        if str(permission.get("emailAddress") or "").casefold() == normalized:
             return permission
     return None
 
