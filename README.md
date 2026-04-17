@@ -281,7 +281,6 @@ The repository includes:
 - `scripts/`: local repository automation helpers
 - `tests/`: unit tests
 - `noxfile.py`: nox session matrix
-- `demo.tape`: VHS tape script for animated terminal demo
 - `AGENTS.md`: repository guidance for contributors and coding agents
 - `CONTRIBUTING.md`: contributor workflow and commit conventions
 

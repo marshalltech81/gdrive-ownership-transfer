@@ -39,7 +39,6 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - `.editorconfig`: editor defaults for Python, YAML, TOML, JSON, and Markdown
 - `.pre-commit-config.yaml`: local contributor quality gates
 - `noxfile.py`: nox sessions for lint, format, typecheck, tests (Python 3.11–3.13), and bandit
-- `demo.tape`: VHS tape script for generating an animated terminal demo GIF
 
 ### GitHub Automation
 
