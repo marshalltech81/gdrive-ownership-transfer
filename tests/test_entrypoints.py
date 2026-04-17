@@ -18,4 +18,4 @@ def test_module_entrypoint_runs_main(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delitem(sys.modules, "gdrive_ownership_transfer.__main__", raising=False)
 
     with pytest.raises(SystemExit, match="0"):
-        runpy.run_module("gdrive_ownership_transfer", run_name="__main__")
+        runpy.run_module("gdrive_ownership_transfer.__main__", run_name="__main__")

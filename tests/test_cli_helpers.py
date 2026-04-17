@@ -637,7 +637,7 @@ def test_walk_tree_recurses_and_preserves_paths(
 def test_run_scan_honors_owned_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.walk_tree",
-        lambda _service, _root, page_size: [
+        lambda *_a, **_k: [
             make_item(owned_by_me=True),
             make_item(owned_by_me=False),
         ],
@@ -654,7 +654,7 @@ def test_run_scan_quiet_suppresses_non_owned_output(
 ) -> None:
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.walk_tree",
-        lambda _service, _root, page_size: [
+        lambda *_a, **_k: [
             make_item(owned_by_me=True),
             make_item(owned_by_me=False),
         ],
@@ -2076,7 +2076,7 @@ def test_main_diff_subcommand(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     )
     monkeypatch.setattr(
         "sys.argv",
-        ["gdrive-ownership-transfer", "diff", "--csv-a", str(csv_a), "--csv-b", str(csv_b)],
+        ["gdrive-ownership-transfer", "diff", str(csv_a), str(csv_b)],
     )
     result = main()
     assert result == 0

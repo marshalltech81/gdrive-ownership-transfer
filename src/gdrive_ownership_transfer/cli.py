@@ -203,8 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
         "diff",
         help="Compare two CSV reports and show items present in the first but not the second.",
     )
-    diff_parser.add_argument("--csv-a", required=True, type=Path, help="First CSV report.")
-    diff_parser.add_argument("--csv-b", required=True, type=Path, help="Second CSV report.")
+    diff_parser.add_argument("csv_a", type=Path, help="First CSV report.")
+    diff_parser.add_argument("csv_b", type=Path, help="Second CSV report.")
     diff_parser.add_argument(
         "--key-field",
         default="item_id",
@@ -957,6 +957,7 @@ def _run_loop(  # noqa: C901
                 f"\n{n} item{'s' if n != 1 else ''} will be modified. Proceed? [y/N] ",
                 end="",
                 flush=True,
+                file=sys.stderr,
             )
             if input().strip().lower() != "y":
                 raise SystemExit("Aborted.")
@@ -1022,6 +1023,7 @@ def _run_loop(  # noqa: C901
                         f"[interactive] {item.path} :: {plan.action}: {plan.detail}\nApply? [y/N] ",
                         end="",
                         flush=True,
+                        file=sys.stderr,
                     )
                     if input().strip().lower() != "y":
                         row["status"] = "skipped"

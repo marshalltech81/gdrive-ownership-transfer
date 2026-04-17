@@ -113,10 +113,10 @@ uv run gdrive-ownership-transfer accept \
 ### 4. Compare two report CSVs
 
 ```bash
-uv run gdrive-ownership-transfer diff before.csv after.csv
+uv run gdrive-ownership-transfer diff before.csv after.csv --key-field item_id
 ```
 
-Pass `--key-field name` to diff on a different column (default: `item_id`).
+The two positional arguments are the paths to the CSV reports. Pass `--key-field name` to diff on a different column (default: `item_id`).
 
 ### 5. Revoke the stored OAuth token
 
@@ -138,7 +138,7 @@ uv run gdrive-ownership-transfer doctor \
 
 ## Common flags
 
-All six subcommands accept these optional flags:
+`scan`, `request`, `accept`, and `doctor` accept these optional flags:
 
 | Flag | Description |
 |------|-------------|
@@ -148,9 +148,9 @@ All six subcommands accept these optional flags:
 | `--exclude-path PREFIX` | Skip items whose path starts with `PREFIX`. |
 | `--output-format {text,json}` | Output format. `json` prints a JSON array to stdout; metadata goes to stderr. Default: `text`. |
 | `--log-file PATH` | Write a structured JSON audit log to this path in addition to the normal report. |
-| `--quiet` | Suppress skipped-item lines; show only applied changes and errors. |
+| `--quiet` | Suppress skipped-item lines; dry-run, applied, and error lines still print. |
 | `--page-size N` | Number of Drive API results per page (default: 100). |
-| `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/token.json`). |
+| `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/default.json`). |
 | `--rate-limit N` | Maximum Drive API calls per 100 seconds (default: 100). |
 | `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `opentelemetry-*` packages). |
 | `--notify-webhook URL` | POST a JSON run summary to this URL after the run completes. |

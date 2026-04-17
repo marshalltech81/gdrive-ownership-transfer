@@ -29,7 +29,6 @@ dev = [
 gdrive-ownership-transfer = "gdrive_ownership_transfer.cli:main"
 
 [tool.uv]
-required-version = "==0.11.6"
 default-groups = ["dev"]
 
 [build-system]

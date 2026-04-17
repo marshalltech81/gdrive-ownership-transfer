@@ -42,7 +42,8 @@ def validate_messages(messages: Iterable[str]) -> list[str]:
         if not is_conventional_commit(subject):
             errors.append(
                 f"Invalid Conventional Commit subject: {subject!r}. "
-                f"Expected '<type>(optional-scope)(optional-!): description'."
+                f"Expected '<type>[(optional-scope)][!]: description' "
+                f"where type is one of: {', '.join(ALLOWED_TYPES)}."
             )
     return errors
 
