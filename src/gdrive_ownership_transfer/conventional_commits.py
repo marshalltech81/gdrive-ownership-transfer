@@ -55,7 +55,8 @@ def format_errors(errors: Iterable[str]) -> str:
 
 
 def read_commit_subjects_from_range(revision_range: str) -> list[str]:
-    if not re.fullmatch(r"[A-Za-z0-9._/\-^]+\.\.[A-Za-z0-9._/\-^]+", revision_range):
+    _rev = r"[A-Za-z0-9][A-Za-z0-9._/\-^]*"
+    if not re.fullmatch(rf"{_rev}\.\.{_rev}", revision_range):
         raise ValueError(f"Unsafe git revision range: {revision_range!r}")
 
     git_executable = shutil.which("git")

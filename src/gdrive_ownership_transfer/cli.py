@@ -436,6 +436,7 @@ def main() -> int:  # noqa: C901
     print(f"Root folder: {root['name']} ({root['id']})", file=_meta_out)
 
     confirm = getattr(args, "confirm", False)
+    notify_webhook = getattr(args, "notify_webhook", None)
     common = dict(
         page_size=args.page_size,
         quiet=args.quiet,
@@ -444,7 +445,6 @@ def main() -> int:  # noqa: C901
         path_prefix=args.path_prefix,
         exclude_mime_types=getattr(args, "exclude_mime_types", None),
         exclude_path_prefix=getattr(args, "exclude_path_prefix", None),
-        notify_webhook=getattr(args, "notify_webhook", None),
     )
 
     if args.command == "scan":
@@ -500,8 +500,8 @@ def main() -> int:  # noqa: C901
     if args.log_file:
         write_json_log(args.log_file, rows)
         print(f"Log written: {args.log_file}", file=_meta_out)
-    if common.get("notify_webhook"):
-        _notify_webhook(common["notify_webhook"], rows, command=args.command)
+    if notify_webhook:
+        _notify_webhook(notify_webhook, rows, command=args.command)
 
     return 0
 
@@ -833,7 +833,6 @@ def run_scan(
     path_prefix: str | None,
     exclude_mime_types: list[str] | None = None,
     exclude_path_prefix: str | None = None,
-    notify_webhook: str | None = None,
 ) -> list[dict[str, str]]:
     _out = sys.stderr if output_format == "json" else sys.stdout
     all_items = _collect_items_with_progress(
@@ -1024,6 +1023,10 @@ def _run_loop(  # noqa: C901
         else:
             plan_to_use = plan
 
+        # Reflect the actual plan (may differ from initial after idempotency re-check).
+        row["action"] = plan_to_use.action
+        row["detail"] = plan_to_use.detail
+
         # Reserve a slot atomically right before the API call so interactive/
         # idempotency skips do not consume a max-items slot.
         with count_lock:
@@ -1138,7 +1141,6 @@ def run_request(
     confirm: bool,
     exclude_mime_types: list[str] | None = None,
     exclude_path_prefix: str | None = None,
-    notify_webhook: str | None = None,
     concurrency: int = 1,
     checkpoint_file: Path | None = None,
     dry_run_diff: bool = False,
@@ -1187,7 +1189,6 @@ def run_accept(
     confirm: bool,
     exclude_mime_types: list[str] | None = None,
     exclude_path_prefix: str | None = None,
-    notify_webhook: str | None = None,
     concurrency: int = 1,
     checkpoint_file: Path | None = None,
     dry_run_diff: bool = False,
