@@ -4,10 +4,13 @@ import argparse
 import csv
 import json
 import os
+import random
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -17,9 +20,17 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _VERSION = _pkg_version("gdrive-ownership-transfer")
+except Exception:
+    _VERSION = "unknown"
+
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_EXPIRY_WARN_SECONDS = 300
 
 ActionType = Literal["skip", "create-permission", "update-permission", "accept-transfer"]
 
@@ -52,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Bulk-initiate and accept Google Drive ownership transfers inside a shared-folder tree."
         )
     )
+    parser.add_argument(
+        "--version", action="version", version=f"gdrive-ownership-transfer {_VERSION}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan_parser = subparsers.add_parser("scan", help="List items inside a folder tree.")
@@ -80,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Perform the transfer-request calls. Without this flag, the command is a dry run.",
     )
+    request_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Prompt for confirmation before applying mutations (requires --apply).",
+    )
 
     accept_parser = subparsers.add_parser(
         "accept",
@@ -90,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Perform the ownership-acceptance calls. Without this flag, the command is a dry run.",
+    )
+    accept_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Prompt for confirmation before applying mutations (requires --apply).",
     )
 
     return parser
@@ -126,9 +150,39 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Optional cap on how many actionable items to mutate when --apply is used.",
     )
     parser.add_argument(
+        "--filter-mime-type",
+        action="append",
+        dest="mime_types",
+        metavar="MIME_TYPE",
+        help=(
+            "Only process items with this MIME type. May be repeated. "
+            "Folders are always traversed regardless of this filter."
+        ),
+    )
+    parser.add_argument(
+        "--filter-path",
+        dest="path_prefix",
+        metavar="PREFIX",
+        help="Only process items whose path starts with PREFIX.",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Output format for results (default: text). "
+            "When 'json', per-item lines go to stderr and results are printed as JSON to stdout."
+        ),
+    )
+    parser.add_argument(
         "--report-file",
         type=Path,
         help="Optional CSV report path.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        help="Optional structured JSON log path.",
     )
     parser.add_argument(
         "--quiet",
@@ -167,49 +221,60 @@ def main() -> int:
             "transfers for shared-drive items."
         )
 
-    print(f"Authenticated as: {format_user(me)}")
-    print(f"Root folder: {root['name']} ({root['id']})")
+    _meta_out = sys.stderr if args.output_format == "json" else sys.stdout
+    print(f"Authenticated as: {format_user(me)}", file=_meta_out)
+    print(f"Root folder: {root['name']} ({root['id']})", file=_meta_out)
+
+    confirm = getattr(args, "confirm", False)
+    common = dict(
+        page_size=args.page_size,
+        quiet=args.quiet,
+        output_format=args.output_format,
+        mime_types=args.mime_types,
+        path_prefix=args.path_prefix,
+    )
 
     if args.command == "scan":
-        rows = run_scan(
-            service,
-            root,
-            page_size=args.page_size,
-            owned_only=args.owned_only,
-            quiet=args.quiet,
-        )
+        rows = run_scan(service, root, owned_only=args.owned_only, **common)
     elif args.command == "request":
         target_email = args.target_email or infer_target_email(root, me.get("emailAddress"))
-        print(f"Target owner: {target_email}")
-        print("Mode: apply" if args.apply else "Mode: dry-run")
+        print(f"Target owner: {target_email}", file=_meta_out)
+        print("Mode: apply" if args.apply else "Mode: dry-run", file=_meta_out)
         rows = run_request(
             service,
             root,
             target_email=target_email,
-            page_size=args.page_size,
             apply=args.apply,
             max_items=args.max_items,
             email_message=args.email_message,
-            quiet=args.quiet,
+            confirm=confirm,
+            **common,
         )
     elif args.command == "accept":
-        print("Mode: apply" if args.apply else "Mode: dry-run")
+        print("Mode: apply" if args.apply else "Mode: dry-run", file=_meta_out)
         rows = run_accept(
             service,
             root,
             recipient_email=me["emailAddress"],
-            page_size=args.page_size,
             apply=args.apply,
             max_items=args.max_items,
-            quiet=args.quiet,
+            confirm=confirm,
+            **common,
         )
     else:
         raise SystemExit(f"Unknown command: {args.command!r}")
 
-    print_summary(rows)
+    if args.output_format == "json":
+        print(json.dumps(rows, indent=2))
+    else:
+        print_summary(rows)
+
     if args.report_file:
         write_report(args.report_file, rows)
-        print(f"Report written: {args.report_file}")
+        print(f"Report written: {args.report_file}", file=_meta_out)
+    if args.log_file:
+        write_json_log(args.log_file, rows)
+        print(f"Log written: {args.log_file}", file=_meta_out)
     return 0
 
 
@@ -225,9 +290,13 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
         try:
             credentials = Credentials.from_authorized_user_file(str(token_file), SCOPES)
         except Exception:
-            print(f"Warning: token file {token_file} is invalid or unreadable — re-authenticating.")
+            print(
+                f"Warning: token file {token_file} is invalid or unreadable — re-authenticating.",
+                file=sys.stderr,
+            )
 
     if credentials and credentials.valid:
+        _warn_if_expiring_soon(credentials)
         return credentials
 
     if credentials and credentials.expired and credentials.refresh_token:
@@ -237,9 +306,30 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
         credentials = flow.run_local_server(port=0)
 
     token_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(token_file.parent, 0o700)
+    except OSError:
+        pass
     token_file.write_text(credentials.to_json(), encoding="utf-8")
-    os.chmod(token_file, 0o600)
+    try:
+        os.chmod(token_file, 0o600)
+    except OSError:
+        pass
     return credentials
+
+
+def _warn_if_expiring_soon(credentials: Credentials) -> None:
+    expiry = getattr(credentials, "expiry", None)
+    if expiry is None:
+        return
+    remaining = expiry.replace(tzinfo=UTC) - datetime.now(UTC)
+    if remaining.total_seconds() < _EXPIRY_WARN_SECONDS:
+        secs = int(remaining.total_seconds())
+        print(
+            f"Warning: OAuth token expires in {secs}s — consider deleting "
+            f"the token file and re-authenticating.",
+            file=sys.stderr,
+        )
 
 
 def build_drive_service(credentials: Credentials) -> Resource:
@@ -253,7 +343,7 @@ def execute_with_retries(request_fn: Callable[[], Any], attempts: int = 5) -> An
         except HttpError as exc:
             if not is_retryable(exc) or attempt == attempts - 1:
                 raise
-            time.sleep(2**attempt)
+            time.sleep(2**attempt + random.uniform(0, 1))  # nosec B311
     raise RuntimeError("Unexpected retry loop exit")
 
 
@@ -286,6 +376,26 @@ def get_file(service: Resource, file_id: str, fields: str) -> dict[str, Any]:
             )
         ),
     )
+
+
+def _apply_filters(
+    items: list[DriveItem],
+    *,
+    mime_types: list[str] | None,
+    path_prefix: str | None,
+) -> list[DriveItem]:
+    """Return items matching the given filters.
+
+    Folders are included in the output when they pass filters, but note that
+    walk_tree always traverses all folders regardless of this function — this
+    only controls which items are planned and reported.
+    """
+    result = items
+    if mime_types:
+        result = [item for item in result if item.mime_type in mime_types]
+    if path_prefix:
+        result = [item for item in result if item.path.startswith(path_prefix)]
+    return result
 
 
 def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> Iterator[DriveItem]:
@@ -357,6 +467,24 @@ def list_children(service: Resource, parent_id: str, page_size: int) -> list[dic
     return children
 
 
+def _collect_items_with_progress(
+    service: Resource,
+    root: dict[str, Any],
+    *,
+    page_size: int,
+    output_format: str,
+) -> list[DriveItem]:
+    items: list[DriveItem] = []
+    use_progress = output_format == "text" and sys.stderr.isatty()
+    for item in walk_tree(service, root, page_size=page_size):
+        items.append(item)
+        if use_progress:
+            print(f"\r[scanning] {len(items)} items...", end="", file=sys.stderr, flush=True)
+    if use_progress and items:
+        print(f"\r[scanning] {len(items)} items found.    ", file=sys.stderr)
+    return items
+
+
 def run_scan(
     service: Resource,
     root: dict[str, Any],
@@ -364,14 +492,22 @@ def run_scan(
     page_size: int,
     owned_only: bool,
     quiet: bool,
+    output_format: str,
+    mime_types: list[str] | None,
+    path_prefix: str | None,
 ) -> list[dict[str, str]]:
+    _out = sys.stderr if output_format == "json" else sys.stdout
+    all_items = _collect_items_with_progress(
+        service, root, page_size=page_size, output_format=output_format
+    )
+    items = _apply_filters(all_items, mime_types=mime_types, path_prefix=path_prefix)
     rows: list[dict[str, str]] = []
-    for item in walk_tree(service, root, page_size=page_size):
+    for item in items:
         status = "owned-by-me" if item.owned_by_me else "not-owned-by-me"
         if owned_only and not item.owned_by_me:
             continue
         if not quiet or item.owned_by_me:
-            print(f"[{status}] {item.path}")
+            print(f"[{status}] {item.path}", file=_out)
         rows.append(
             {
                 "path": item.path,
@@ -393,20 +529,43 @@ def _run_loop(
     apply: bool,
     max_items: int | None,
     quiet: bool,
+    output_format: str,
+    mime_types: list[str] | None,
+    path_prefix: str | None,
+    confirm: bool,
     plan_fn: Callable[[DriveItem], ActionPlan],
     apply_fn: Callable[[DriveItem, ActionPlan], None],
 ) -> list[dict[str, str]]:
+    _out = sys.stderr if output_format == "json" else sys.stdout
+
+    all_items = _collect_items_with_progress(
+        service, root, page_size=page_size, output_format=output_format
+    )
+    items = _apply_filters(all_items, mime_types=mime_types, path_prefix=path_prefix)
+    planned = [(item, plan_fn(item)) for item in items]
+
+    if confirm and apply:
+        actionable = [(item, plan) for item, plan in planned if plan.action != "skip"]
+        if actionable:
+            n = len(actionable)
+            print(
+                f"\n{n} item{'s' if n != 1 else ''} will be modified. Proceed? [y/N] ",
+                end="",
+                flush=True,
+            )
+            if input().strip().lower() != "y":
+                raise SystemExit("Aborted.")
+
     rows: list[dict[str, str]] = []
     attempted_count = 0
 
-    for item in walk_tree(service, root, page_size=page_size):
-        plan = plan_fn(item)
+    for item, plan in planned:
         row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
 
         if plan.action == "skip":
             row["status"] = "skipped"
             if not quiet:
-                print(f"[skip] {item.path} :: {plan.detail}")
+                print(f"[skip] {item.path} :: {plan.detail}", file=_out)
             rows.append(row)
             continue
 
@@ -414,13 +573,13 @@ def _run_loop(
             row["status"] = "skipped"
             row["detail"] = f"{plan.detail}; max-items reached"
             if not quiet:
-                print(f"[skip] {item.path} :: max-items reached")
+                print(f"[skip] {item.path} :: max-items reached", file=_out)
             rows.append(row)
             continue
 
         if not apply:
             row["status"] = "dry-run"
-            print(f"[dry-run] {item.path} :: {plan.detail}")
+            print(f"[dry-run] {item.path} :: {plan.detail}", file=_out)
             rows.append(row)
             continue
 
@@ -429,11 +588,11 @@ def _run_loop(
         try:
             apply_fn(item, plan)
             row["status"] = "applied"
-            print(f"[applied] {item.path} :: {plan.detail}")
+            print(f"[applied] {item.path} :: {plan.detail}", file=_out)
         except HttpError as exc:
             row["status"] = "error"
             row["detail"] = format_http_error(exc)
-            print(f"[error] {item.path} :: {row['detail']}")
+            print(f"[error] {item.path} :: {row['detail']}", file=_out)
         rows.append(row)
 
     return rows
@@ -449,6 +608,10 @@ def run_request(
     max_items: int | None,
     email_message: str | None,
     quiet: bool,
+    output_format: str,
+    mime_types: list[str] | None,
+    path_prefix: str | None,
+    confirm: bool,
 ) -> list[dict[str, str]]:
     return _run_loop(
         service,
@@ -457,6 +620,10 @@ def run_request(
         apply=apply,
         max_items=max_items,
         quiet=quiet,
+        output_format=output_format,
+        mime_types=mime_types,
+        path_prefix=path_prefix,
+        confirm=confirm,
         plan_fn=lambda item: plan_request(item, target_email),
         apply_fn=lambda item, plan: apply_request_plan(
             service, item, target_email=target_email, plan=plan, email_message=email_message
@@ -473,6 +640,10 @@ def run_accept(
     apply: bool,
     max_items: int | None,
     quiet: bool,
+    output_format: str,
+    mime_types: list[str] | None,
+    path_prefix: str | None,
+    confirm: bool,
 ) -> list[dict[str, str]]:
     return _run_loop(
         service,
@@ -481,6 +652,10 @@ def run_accept(
         apply=apply,
         max_items=max_items,
         quiet=quiet,
+        output_format=output_format,
+        mime_types=mime_types,
+        path_prefix=path_prefix,
+        confirm=confirm,
         plan_fn=lambda item: plan_accept(item, recipient_email),
         apply_fn=lambda item, plan: apply_accept_plan(service, item, plan),
     )
@@ -629,6 +804,17 @@ def write_report(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_json_log(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    log_data = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "item_count": len(rows),
+        "items": rows,
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(log_data, handle, indent=2)
 
 
 def print_summary(rows: list[dict[str, str]]) -> None:

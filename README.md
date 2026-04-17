@@ -105,6 +105,32 @@ uv run gdrive-ownership-transfer accept \
   --report-file accept-report.csv
 ```
 
+## Common flags
+
+All three subcommands accept these optional flags:
+
+| Flag | Description |
+|------|-------------|
+| `--filter-mime-type MIME_TYPE` | Only process items of this MIME type. Repeat to allow multiple types. |
+| `--filter-path PREFIX` | Only process items whose path starts with `PREFIX`. |
+| `--output-format {text,json}` | Output format. `json` prints a JSON array to stdout; metadata goes to stderr. Default: `text`. |
+| `--log-file PATH` | Write a structured JSON audit log to this path in addition to the normal report. |
+| `--quiet` | Suppress skipped-item lines; show only applied changes and errors. |
+| `--page-size N` | Number of Drive API results per page (default: 100). |
+| `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/token.json`). |
+
+`request` and `accept` also accept:
+
+| Flag | Description |
+|------|-------------|
+| `--confirm` | Prompt for confirmation before applying any changes. |
+
+Global flag:
+
+| Flag | Description |
+|------|-------------|
+| `--version` | Print the package version and exit. |
+
 ## Notes
 
 - If the recipient does not want to run the CLI, they can still accept requests in Google Drive by searching for `pendingowner:me`.
@@ -113,6 +139,9 @@ uv run gdrive-ownership-transfer accept \
 - The default behavior is a dry run. You must pass `--apply` to make changes.
 - Reports are optional CSV files with one row per visited item.
 - Pass `--quiet` to suppress skipped-item output and keep the terminal focused on applied changes and errors.
+- Pass `--confirm` to require interactive confirmation before any changes are applied.
+- Use `--output-format json` to pipe structured output into other tools; progress messages go to stderr.
+- Use `--log-file` to write a timestamped JSON audit log in addition to a CSV report.
 
 ## Troubleshooting
 
