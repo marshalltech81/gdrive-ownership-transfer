@@ -225,9 +225,7 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
         try:
             credentials = Credentials.from_authorized_user_file(str(token_file), SCOPES)
         except Exception:
-            print(
-                f"Warning: token file {token_file} is invalid or unreadable — re-authenticating."
-            )
+            print(f"Warning: token file {token_file} is invalid or unreadable — re-authenticating.")
 
     if credentials and credentials.valid:
         return credentials
