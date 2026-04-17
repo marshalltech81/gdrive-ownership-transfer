@@ -318,7 +318,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress skipped-item output. Errors and the summary are always shown.",
+        help=(
+            "Suppress skipped and not-owned-by-me output. "
+            "Dry-run, applied, and error lines still print."
+        ),
     )
     parser.add_argument(
         "--notify-webhook",
@@ -479,6 +482,7 @@ def main() -> int:  # noqa: C901
             dry_run_diff=args.dry_run_diff,
             interactive=args.interactive,
             idempotency_check=args.idempotency_check,
+            credentials=credentials,
             **common,
         )
     elif args.command == "accept":
@@ -495,6 +499,7 @@ def main() -> int:  # noqa: C901
             dry_run_diff=args.dry_run_diff,
             interactive=args.interactive,
             idempotency_check=args.idempotency_check,
+            credentials=credentials,
             **common,
         )
     else:
@@ -999,6 +1004,10 @@ def _run_loop(  # noqa: C901
                     with print_lock:
                         print(f"[skip] {item.path} :: max-items reached", file=_out)
                 return row
+            # Increment inside the same lock section to prevent a race where
+            # multiple concurrent workers pass the cap check simultaneously.
+            if apply:
+                attempted_ref[0] += 1
 
         if not apply:
             row["status"] = "dry-run"
@@ -1048,10 +1057,6 @@ def _run_loop(  # noqa: C901
                 plan_to_use = plan
         else:
             plan_to_use = plan
-
-        # Count every attempted mutation so max-items remains a hard cap on side effects.
-        with count_lock:
-            attempted_ref[0] += 1
 
         # Proactive token refresh mid-run
         if credentials is not None:
@@ -1370,7 +1375,7 @@ def run_diff(csv_a: Path, csv_b: Path, *, key_field: str = "item_id") -> int:
 
     def _read_csv(path: Path) -> dict[str, dict[str, str]]:
         with path.open(newline="", encoding="utf-8") as handle:
-            return {row[key_field]: row for row in csv.DictReader(handle) if key_field in row}
+            return {row[key_field]: row for row in csv.DictReader(handle) if row.get(key_field)}
 
     rows_a = _read_csv(csv_a)
     rows_b = _read_csv(csv_b)
@@ -1438,7 +1443,7 @@ def run_doctor(
     if token_exists and os.name == "posix":
         try:
             mode = token_file.stat().st_mode & 0o777
-            check("token file permissions", not (mode & 0o177), f"mode {oct(mode)}")
+            check("token file permissions", not (mode & 0o077), f"mode {oct(mode)}")
         except OSError:
             pass
 
