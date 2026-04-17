@@ -237,6 +237,15 @@ def test_plan_request_skips_shared_drive_items() -> None:
     )
 
 
+def test_plan_accept_skips_shared_drive_items() -> None:
+    item = make_item(drive_id="drive-123")
+
+    assert plan_accept(item, "recipient@example.com") == ActionPlan(
+        "skip",
+        "item belongs to a shared drive",
+    )
+
+
 def test_plan_request_skips_existing_owner() -> None:
     item = make_item(
         permissions=(

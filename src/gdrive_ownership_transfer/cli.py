@@ -494,6 +494,8 @@ def plan_request(item: DriveItem, target_email: str) -> ActionPlan:
 
 
 def plan_accept(item: DriveItem, recipient_email: str) -> ActionPlan:
+    if item.drive_id:
+        return ActionPlan("skip", "item belongs to a shared drive")
     permission = find_user_permission(item.permissions, recipient_email)
     if not permission:
         return ActionPlan("skip", "recipient has no explicit user permission on this item")
