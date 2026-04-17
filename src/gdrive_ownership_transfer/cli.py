@@ -102,7 +102,10 @@ class TokenBucket:
     def __init__(self, rate: float, per_seconds: float = 100.0) -> None:
         self._rate = rate
         self._per_seconds = per_seconds
-        self._tokens = rate
+        # Capacity is at least 1 so fractional rates (e.g. 0.5 req/100s) can
+        # still issue the first request immediately instead of sleeping forever.
+        self._capacity = max(1.0, rate)
+        self._tokens = self._capacity
         self._last_check = time.monotonic()
         self._lock = threading.Lock()
 
@@ -112,7 +115,9 @@ class TokenBucket:
             now = time.monotonic()
             elapsed = now - self._last_check
             self._last_check = now
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate / self._per_seconds)
+            self._tokens = min(
+                self._capacity, self._tokens + elapsed * self._rate / self._per_seconds
+            )
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
             else:
@@ -1043,6 +1048,11 @@ def _run_loop(  # noqa: C901
             row["detail"] = format_http_error(exc)
             with print_lock:
                 print(f"[error] {item.path} :: {row['detail']}", file=_out)
+        except Exception as exc:
+            row["status"] = "error"
+            row["detail"] = str(exc) or exc.__class__.__name__
+            with print_lock:
+                print(f"[error] {item.path} :: {row['detail']}", file=_out)
         return row
 
     attempted_ref = [0]
@@ -1342,10 +1352,21 @@ def run_diff(csv_a: Path, csv_b: Path, *, key_field: str = "item_id") -> int:
 
     def _read_csv(path: Path) -> dict[str, dict[str, str]]:
         with path.open(newline="", encoding="utf-8") as handle:
-            return {row[key_field]: row for row in csv.DictReader(handle) if row.get(key_field)}
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            if key_field not in fieldnames:
+                raise ValueError(
+                    f"{path}: key field {key_field!r} not found. "
+                    f"Available fields: {', '.join(fieldnames) if fieldnames else '(none)'}"
+                )
+            return {row[key_field]: row for row in reader if row.get(key_field)}
 
-    rows_a = _read_csv(csv_a)
-    rows_b = _read_csv(csv_b)
+    try:
+        rows_a = _read_csv(csv_a)
+        rows_b = _read_csv(csv_b)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     missing = {k: v for k, v in rows_a.items() if k not in rows_b}
     status_only = {

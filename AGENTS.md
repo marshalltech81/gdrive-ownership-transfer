@@ -55,7 +55,7 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 | `scan` | Walk the folder tree and show items owned by the authenticated user |
 | `request` | Initiate ownership-transfer requests for owned items |
 | `accept` | Accept pending ownership-transfer requests as the recipient |
-| `diff` | Compare two CSV report files and show additions, removals, and changes |
+| `diff` | Compare two CSV report files and show items missing from the second file plus status changes |
 | `revoke` | Revoke the stored OAuth token and remove the token file |
 | `doctor` | Run diagnostic checks: credentials, token, Drive API, and folder access |
 
