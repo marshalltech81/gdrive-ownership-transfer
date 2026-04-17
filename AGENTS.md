@@ -19,7 +19,7 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - Treat Google Drive API limitations as product constraints, not bugs to paper over.
 - Prefer small, testable functions around planning, filtering, and reporting logic.
 - Keep dependencies lean and avoid adding heavy frameworks for a small CLI utility.
-- Optional features (`rich`, `otel`) are soft dependencies gated behind `try/except ImportError` — the tool must work without them installed.
+- Optional features (e.g. `rich`) are soft dependencies gated behind `try/except ImportError` — the tool must work without them installed.
 
 ## Current Architecture
 

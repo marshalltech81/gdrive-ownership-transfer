@@ -152,7 +152,6 @@ uv run gdrive-ownership-transfer doctor \
 | `--page-size N` | Number of Drive API results per page (default: 100). |
 | `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/default.json`). |
 | `--rate-limit N` | Maximum Drive API calls per 100 seconds. Default: no proactive throttling. |
-| `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `opentelemetry-*` packages). |
 | `--notify-webhook URL` | POST a JSON run summary to this URL after the run completes. |
 
 `request` and `accept` also accept:
@@ -191,7 +190,7 @@ Global flag:
 - Use `--log-file` to write a timestamped JSON audit log in addition to a CSV report.
 - Use `--checkpoint-file` to resume an interrupted bulk run; completed item IDs are saved after each successful apply.
 - Use `--concurrency N` to parallelize Drive API calls when processing large folder trees.
-- Use `--dry-run-diff` to preview every planned change as an ASCII table before committing.
+- Use `--dry-run-diff` to preview every planned change as an ASCII table (dry-run only; omit `--apply`).
 - Use `--notify-webhook` to receive a JSON summary POST at the end of a run (for CI or alerting pipelines).
 - Use `--rate-limit` to stay within Drive API quota on large runs.
 

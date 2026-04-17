@@ -47,16 +47,6 @@ except ImportError:
     _RICH_AVAILABLE = False
     _rich_err_console = None  # type: ignore[assignment]
 
-try:
-    from opentelemetry import trace as _otel_trace
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.trace import TracerProvider as _OtelTracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor as _OtelBatchProcessor
-
-    _OTEL_AVAILABLE = True
-except ImportError:
-    _OTEL_AVAILABLE = False
-
 # ---------------------------------------------------------------------------
 # Constants and module-level state
 # ---------------------------------------------------------------------------
@@ -71,7 +61,6 @@ _IDEMPOTENCY_FIELDS = (
 
 ActionType = Literal["skip", "create-permission", "update-permission", "accept-transfer"]
 
-_tracer: Any = None
 _rate_bucket: TokenBucket | None = None
 
 
@@ -336,12 +325,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Maximum Drive API requests per 100 seconds. Proactively sleeps to stay under quota.",
     )
-    parser.add_argument(
-        "--otlp-endpoint",
-        metavar="URL",
-        default=None,
-        help="OpenTelemetry OTLP gRPC endpoint for tracing (requires opentelemetry extra).",
-    )
 
 
 def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
@@ -386,9 +369,8 @@ def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:  # noqa: C901
-    global _rate_bucket, _tracer
+    global _rate_bucket
     _rate_bucket = None
-    _tracer = None
 
     parser = build_parser()
     args = parser.parse_args()
@@ -413,9 +395,6 @@ def main() -> int:  # noqa: C901
 
     if args.rate_limit:
         _rate_bucket = TokenBucket(args.rate_limit)
-
-    if getattr(args, "otlp_endpoint", None):
-        _setup_otel(args.otlp_endpoint)
 
     credentials = load_credentials(args.credentials_file, args.token_file)
     service = build_drive_service(credentials)
@@ -616,27 +595,6 @@ def _ensure_token_fresh(credentials: Credentials) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OTel
-# ---------------------------------------------------------------------------
-
-
-def _setup_otel(endpoint: str) -> None:
-    global _tracer
-    if not _OTEL_AVAILABLE:
-        print(
-            "Warning: opentelemetry not installed. "
-            "Install with: pip install gdrive-ownership-transfer[otel]",
-            file=sys.stderr,
-        )
-        return
-    provider = _OtelTracerProvider()
-    exporter = OTLPSpanExporter(endpoint=endpoint)
-    provider.add_span_processor(_OtelBatchProcessor(exporter))
-    _otel_trace.set_tracer_provider(provider)
-    _tracer = _otel_trace.get_tracer("gdrive_ownership_transfer")
-
-
-# ---------------------------------------------------------------------------
 # Drive API helpers
 # ---------------------------------------------------------------------------
 
@@ -650,9 +608,6 @@ def execute_with_retries(request_fn: Callable[[], Any], attempts: int = 5) -> An
         try:
             if _rate_bucket is not None:
                 _rate_bucket.acquire()
-            if _tracer is not None:
-                with _tracer.start_as_current_span("drive.request"):
-                    return request_fn()
             return request_fn()
         except HttpError as exc:
             if not is_retryable(exc) or attempt == attempts - 1:
