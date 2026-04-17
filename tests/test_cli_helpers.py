@@ -845,6 +845,35 @@ def test_apply_request_plan_create_permission() -> None:
         "emailAddress": "owner@example.com",
         "pendingOwner": True,
     }
+    assert permissions_api.create_calls[0]["emailMessage"] == "please accept"
+    assert permissions_api.create_calls[0]["sendNotificationEmail"] is True
+
+
+def test_apply_request_plan_create_permission_no_message() -> None:
+    permissions_api = FakePermissionsApi()
+    service = FakeService(permissions_api=permissions_api)
+
+    apply_request_plan(
+        service,
+        make_item(),
+        target_email="owner@example.com",
+        plan=ActionPlan("create-permission", "create"),
+        email_message=None,
+    )
+
+    assert "emailMessage" not in permissions_api.create_calls[0]
+    assert permissions_api.create_calls[0]["sendNotificationEmail"] is False
+
+
+def test_apply_request_plan_update_requires_permission_id() -> None:
+    with pytest.raises(ValueError, match="permission id"):
+        apply_request_plan(
+            FakeService(),
+            make_item(),
+            target_email="owner@example.com",
+            plan=ActionPlan("update-permission", "update"),
+            email_message=None,
+        )
 
 
 def test_apply_request_plan_update_permission() -> None:

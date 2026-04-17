@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -122,7 +123,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--max-items",
         type=int,
         default=None,
-        help="Optional cap on how many actionable items to process.",
+        help="Optional cap on how many actionable items to mutate when --apply is used.",
     )
     parser.add_argument(
         "--report-file",
@@ -191,7 +192,7 @@ def main() -> int:
             email_message=args.email_message,
             quiet=args.quiet,
         )
-    else:
+    elif args.command == "accept":
         print("Mode: apply" if args.apply else "Mode: dry-run")
         rows = run_accept(
             service,
@@ -202,6 +203,8 @@ def main() -> int:
             max_items=args.max_items,
             quiet=args.quiet,
         )
+    else:
+        raise SystemExit(f"Unknown command: {args.command!r}")
 
     print_summary(rows)
     if args.report_file:
@@ -219,7 +222,12 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
 
     credentials: Credentials | None = None
     if token_file.exists():
-        credentials = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        try:
+            credentials = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        except Exception:
+            print(
+                f"Warning: token file {token_file} is invalid or unreadable — re-authenticating."
+            )
 
     if credentials and credentials.valid:
         return credentials
@@ -232,6 +240,7 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
 
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(credentials.to_json(), encoding="utf-8")
+    os.chmod(token_file, 0o600)
     return credentials
 
 
@@ -532,20 +541,24 @@ def apply_request_plan(
     email_message: str | None,
 ) -> None:
     if plan.action == "create-permission":
-        request = service.permissions().create(
-            fileId=item.id,
-            supportsAllDrives=True,
-            sendNotificationEmail=True,
-            emailMessage=email_message,
-            body={
+        create_kwargs: dict[str, Any] = {
+            "fileId": item.id,
+            "supportsAllDrives": True,
+            "sendNotificationEmail": bool(email_message),
+            "body": {
                 "type": "user",
                 "role": "writer",
                 "emailAddress": target_email,
                 "pendingOwner": True,
             },
-            fields="id,emailAddress,role,pendingOwner",
-        )
+            "fields": "id,emailAddress,role,pendingOwner",
+        }
+        if email_message:
+            create_kwargs["emailMessage"] = email_message
+        request = service.permissions().create(**create_kwargs)
     elif plan.action == "update-permission":
+        if not plan.permission_id:
+            raise ValueError("update-permission action requires a permission id")
         request = service.permissions().update(
             fileId=item.id,
             permissionId=plan.permission_id,
