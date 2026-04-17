@@ -9,6 +9,7 @@ from googleapiclient.errors import HttpError
 
 from gdrive_ownership_transfer.cli import (
     ActionPlan,
+    ActionType,
     DriveItem,
     apply_accept_plan,
     apply_request_plan,
@@ -104,6 +105,16 @@ def make_http_error(status: int, message: str, reason: str = "rateLimitExceeded"
         '{"error":{"message":"' + message + '","errors":[{"reason":"' + reason + '"}]}}'
     ).encode("utf-8")
     return HttpError(SimpleNamespace(status=status, reason="error"), payload, uri="")
+
+
+def test_action_type_values_are_valid() -> None:
+    valid: list[ActionType] = [
+        "skip",
+        "create-permission",
+        "update-permission",
+        "accept-transfer",
+    ]
+    assert len(valid) == 4
 
 
 def test_plan_request_skips_non_owned_items() -> None:
@@ -436,7 +447,7 @@ def test_walk_tree_recurses_and_preserves_paths(
 
     monkeypatch.setattr("gdrive_ownership_transfer.cli.list_children", fake_list_children)
 
-    items = walk_tree(object(), root, page_size=100)
+    items = list(walk_tree(object(), root, page_size=100))
 
     assert [item.path for item in items] == [
         "Shared",
@@ -454,10 +465,29 @@ def test_run_scan_honors_owned_only(monkeypatch: pytest.MonkeyPatch) -> None:
         ],
     )
 
-    rows = run_scan(object(), {}, page_size=10, owned_only=True)
+    rows = run_scan(object(), {}, page_size=10, owned_only=True, quiet=False)
 
     assert len(rows) == 1
     assert rows[0]["status"] == "owned-by-me"
+
+
+def test_run_scan_quiet_suppresses_non_owned_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.walk_tree",
+        lambda _service, _root, page_size: [
+            make_item(owned_by_me=True),
+            make_item(owned_by_me=False),
+        ],
+    )
+
+    rows = run_scan(object(), {}, page_size=10, owned_only=False, quiet=True)
+
+    captured = capsys.readouterr()
+    assert len(rows) == 2
+    assert "[not-owned-by-me]" not in captured.out
+    assert "[owned-by-me]" in captured.out
 
 
 def test_run_request_dry_run_and_max_items(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -475,6 +505,7 @@ def test_run_request_dry_run_and_max_items(monkeypatch: pytest.MonkeyPatch) -> N
         apply=False,
         max_items=1,
         email_message=None,
+        quiet=False,
     )
 
     assert [row["status"] for row in rows] == ["dry-run", "dry-run"]
@@ -497,6 +528,7 @@ def test_run_request_apply_handles_error(monkeypatch: pytest.MonkeyPatch) -> Non
         apply=True,
         max_items=None,
         email_message=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "error"
@@ -529,6 +561,7 @@ def test_run_accept_apply_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
         page_size=10,
         apply=True,
         max_items=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "applied"
@@ -552,6 +585,7 @@ def test_run_request_apply_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
         apply=True,
         max_items=None,
         email_message=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "applied"
@@ -570,9 +604,32 @@ def test_run_request_skips_items_when_plan_says_skip(monkeypatch: pytest.MonkeyP
         apply=True,
         max_items=None,
         email_message=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "skipped"
+
+
+def test_run_request_quiet_suppresses_skip_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    item = make_item(owned_by_me=False)
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_args, **_kwargs: [item])
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        page_size=10,
+        apply=True,
+        max_items=None,
+        email_message=None,
+        quiet=True,
+    )
+
+    captured = capsys.readouterr()
+    assert rows[0]["status"] == "skipped"
+    assert "[skip]" not in captured.out
 
 
 def test_run_request_max_items_stops_after_first_apply(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -592,6 +649,7 @@ def test_run_request_max_items_stops_after_first_apply(monkeypatch: pytest.Monke
         apply=True,
         max_items=1,
         email_message=None,
+        quiet=False,
     )
 
     assert [row["status"] for row in rows] == ["applied", "skipped"]
@@ -617,6 +675,7 @@ def test_run_request_max_items_stops_after_first_error(monkeypatch: pytest.Monke
         apply=True,
         max_items=1,
         email_message=None,
+        quiet=False,
     )
 
     assert [row["status"] for row in rows] == ["error", "skipped"]
@@ -634,6 +693,7 @@ def test_run_accept_skips_when_plan_says_skip(monkeypatch: pytest.MonkeyPatch) -
         page_size=10,
         apply=True,
         max_items=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "skipped"
@@ -660,6 +720,7 @@ def test_run_accept_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
         page_size=10,
         apply=False,
         max_items=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "dry-run"
@@ -692,6 +753,7 @@ def test_run_accept_max_items_stops_after_first_apply(monkeypatch: pytest.Monkey
         page_size=10,
         apply=True,
         max_items=1,
+        quiet=False,
     )
 
     assert [row["status"] for row in rows] == ["applied", "skipped"]
@@ -727,6 +789,7 @@ def test_run_accept_max_items_stops_after_first_error(monkeypatch: pytest.Monkey
         page_size=10,
         apply=True,
         max_items=1,
+        quiet=False,
     )
 
     assert [row["status"] for row in rows] == ["error", "skipped"]
@@ -758,6 +821,7 @@ def test_run_accept_apply_handles_error(monkeypatch: pytest.MonkeyPatch) -> None
         page_size=10,
         apply=True,
         max_items=None,
+        quiet=False,
     )
 
     assert rows[0]["status"] == "error"
@@ -804,7 +868,7 @@ def test_apply_request_plan_rejects_unknown_action() -> None:
             FakeService(),
             make_item(),
             target_email="owner@example.com",
-            plan=ActionPlan("unexpected", "oops"),
+            plan=ActionPlan("skip", "oops"),  # type: ignore[arg-type]
             email_message=None,
         )
 

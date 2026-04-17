@@ -5,10 +5,10 @@ import csv
 import json
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -19,6 +19,8 @@ from googleapiclient.errors import HttpError
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+ActionType = Literal["skip", "create-permission", "update-permission", "accept-transfer"]
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,7 @@ class DriveItem:
 
 @dataclass(frozen=True)
 class ActionPlan:
-    action: str
+    action: ActionType
     detail: str
     permission_id: str | None = None
 
@@ -114,7 +116,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--page-size",
         type=int,
         default=100,
-        help="Page size for Drive API list calls.",
+        help="Page size for Drive API list calls (1–1000).",
     )
     parser.add_argument(
         "--max-items",
@@ -127,11 +129,19 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Optional CSV report path.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress skipped-item output. Errors and the summary are always shown.",
+    )
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.page_size < 1 or args.page_size > 1000:
+        raise SystemExit("--page-size must be between 1 and 1000.")
 
     credentials = load_credentials(args.credentials_file, args.token_file)
     service = build_drive_service(credentials)
@@ -155,14 +165,18 @@ def main() -> int:
             "This folder is in a shared drive. Google does not support ownership "
             "transfers for shared-drive items."
         )
-    if args.page_size < 1 or args.page_size > 1000:
-        raise SystemExit("--page-size must be between 1 and 1000.")
 
     print(f"Authenticated as: {format_user(me)}")
     print(f"Root folder: {root['name']} ({root['id']})")
 
     if args.command == "scan":
-        rows = run_scan(service, root, page_size=args.page_size, owned_only=args.owned_only)
+        rows = run_scan(
+            service,
+            root,
+            page_size=args.page_size,
+            owned_only=args.owned_only,
+            quiet=args.quiet,
+        )
     elif args.command == "request":
         target_email = args.target_email or infer_target_email(root, me.get("emailAddress"))
         print(f"Target owner: {target_email}")
@@ -175,6 +189,7 @@ def main() -> int:
             apply=args.apply,
             max_items=args.max_items,
             email_message=args.email_message,
+            quiet=args.quiet,
         )
     else:
         print("Mode: apply" if args.apply else "Mode: dry-run")
@@ -185,6 +200,7 @@ def main() -> int:
             page_size=args.page_size,
             apply=args.apply,
             max_items=args.max_items,
+            quiet=args.quiet,
         )
 
     print_summary(rows)
@@ -265,10 +281,9 @@ def get_file(service: Resource, file_id: str, fields: str) -> dict[str, Any]:
     )
 
 
-def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> list[DriveItem]:
+def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> Iterator[DriveItem]:
     stack: list[tuple[dict[str, Any], str]] = [(root, root["name"])]
     seen_ids: set[str] = set()
-    items: list[DriveItem] = []
 
     while stack:
         current, current_path = stack.pop()
@@ -286,7 +301,7 @@ def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> list[D
             drive_id=current.get("driveId"),
             permissions=tuple(current.get("permissions", [])),
         )
-        items.append(item)
+        yield item
 
         if not item.is_folder:
             continue
@@ -295,8 +310,6 @@ def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> list[D
         for child in reversed(children):
             child_path = f"{current_path}/{child['name']}"
             stack.append((child, child_path))
-
-    return items
 
 
 def list_children(service: Resource, parent_id: str, page_size: int) -> list[dict[str, Any]]:
@@ -343,13 +356,15 @@ def run_scan(
     *,
     page_size: int,
     owned_only: bool,
+    quiet: bool,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for item in walk_tree(service, root, page_size=page_size):
         status = "owned-by-me" if item.owned_by_me else "not-owned-by-me"
         if owned_only and not item.owned_by_me:
             continue
-        print(f"[{status}] {item.path}")
+        if not quiet or item.owned_by_me:
+            print(f"[{status}] {item.path}")
         rows.append(
             {
                 "path": item.path,
@@ -363,33 +378,36 @@ def run_scan(
     return rows
 
 
-def run_request(
+def _run_loop(
     service: Resource,
     root: dict[str, Any],
     *,
-    target_email: str,
     page_size: int,
     apply: bool,
     max_items: int | None,
-    email_message: str | None,
+    quiet: bool,
+    plan_fn: Callable[[DriveItem], ActionPlan],
+    apply_fn: Callable[[DriveItem, ActionPlan], None],
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     attempted_count = 0
 
     for item in walk_tree(service, root, page_size=page_size):
-        plan = plan_request(item, target_email)
+        plan = plan_fn(item)
         row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
 
         if plan.action == "skip":
             row["status"] = "skipped"
-            print(f"[skip] {item.path} :: {plan.detail}")
+            if not quiet:
+                print(f"[skip] {item.path} :: {plan.detail}")
             rows.append(row)
             continue
 
         if max_items is not None and attempted_count >= max_items:
             row["status"] = "skipped"
             row["detail"] = f"{plan.detail}; max-items reached"
-            print(f"[skip] {item.path} :: max-items reached")
+            if not quiet:
+                print(f"[skip] {item.path} :: max-items reached")
             rows.append(row)
             continue
 
@@ -402,13 +420,7 @@ def run_request(
         # Count every attempted mutation so max-items remains a hard cap on side effects.
         attempted_count += 1
         try:
-            apply_request_plan(
-                service,
-                item,
-                target_email=target_email,
-                plan=plan,
-                email_message=email_message,
-            )
+            apply_fn(item, plan)
             row["status"] = "applied"
             print(f"[applied] {item.path} :: {plan.detail}")
         except HttpError as exc:
@@ -418,6 +430,31 @@ def run_request(
         rows.append(row)
 
     return rows
+
+
+def run_request(
+    service: Resource,
+    root: dict[str, Any],
+    *,
+    target_email: str,
+    page_size: int,
+    apply: bool,
+    max_items: int | None,
+    email_message: str | None,
+    quiet: bool,
+) -> list[dict[str, str]]:
+    return _run_loop(
+        service,
+        root,
+        page_size=page_size,
+        apply=apply,
+        max_items=max_items,
+        quiet=quiet,
+        plan_fn=lambda item: plan_request(item, target_email),
+        apply_fn=lambda item, plan: apply_request_plan(
+            service, item, target_email=target_email, plan=plan, email_message=email_message
+        ),
+    )
 
 
 def run_accept(
@@ -428,46 +465,18 @@ def run_accept(
     page_size: int,
     apply: bool,
     max_items: int | None,
+    quiet: bool,
 ) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    attempted_count = 0
-
-    for item in walk_tree(service, root, page_size=page_size):
-        plan = plan_accept(item, recipient_email)
-        row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
-
-        if plan.action == "skip":
-            row["status"] = "skipped"
-            print(f"[skip] {item.path} :: {plan.detail}")
-            rows.append(row)
-            continue
-
-        if max_items is not None and attempted_count >= max_items:
-            row["status"] = "skipped"
-            row["detail"] = f"{plan.detail}; max-items reached"
-            print(f"[skip] {item.path} :: max-items reached")
-            rows.append(row)
-            continue
-
-        if not apply:
-            row["status"] = "dry-run"
-            print(f"[dry-run] {item.path} :: {plan.detail}")
-            rows.append(row)
-            continue
-
-        # Count every attempted mutation so max-items remains a hard cap on side effects.
-        attempted_count += 1
-        try:
-            apply_accept_plan(service, item, plan)
-            row["status"] = "applied"
-            print(f"[applied] {item.path} :: {plan.detail}")
-        except HttpError as exc:
-            row["status"] = "error"
-            row["detail"] = format_http_error(exc)
-            print(f"[error] {item.path} :: {row['detail']}")
-        rows.append(row)
-
-    return rows
+    return _run_loop(
+        service,
+        root,
+        page_size=page_size,
+        apply=apply,
+        max_items=max_items,
+        quiet=quiet,
+        plan_fn=lambda item: plan_accept(item, recipient_email),
+        apply_fn=lambda item, plan: apply_accept_plan(service, item, plan),
+    )
 
 
 def plan_request(item: DriveItem, target_email: str) -> ActionPlan:

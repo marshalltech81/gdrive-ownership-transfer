@@ -112,6 +112,7 @@ uv run gdrive-ownership-transfer accept \
 - The authenticated user for each run is printed at startup so you can confirm you are using the right account.
 - The default behavior is a dry run. You must pass `--apply` to make changes.
 - Reports are optional CSV files with one row per visited item.
+- Pass `--quiet` to suppress skipped-item output and keep the terminal focused on applied changes and errors.
 
 ## Troubleshooting
 

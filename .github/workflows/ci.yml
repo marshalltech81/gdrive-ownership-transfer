@@ -89,6 +89,9 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+      - name: Security lint
+        run: uv run bandit -q -r src
+
       - name: CLI smoke test
         run: uv run gdrive-ownership-transfer --help
 
