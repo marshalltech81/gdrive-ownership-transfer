@@ -285,7 +285,7 @@ The repository includes:
 
 - `CI`: workflow linting, Conventional Commit validation, linting, formatting, typing, tests, CLI smoke checks, and package builds
 - `Security`: `bandit` and `pip-audit` on `main`, on a weekly schedule, and on manual dispatch
-- `Publish`: build Python distributions and publish to PyPI; build and push Docker image to GHCR on version tags
+- `Publish`: build Python distributions and publish to PyPI on version tags
 - `Release Notes`: auto-generate GitHub Release notes on version tags
 - `Dependabot`: weekly grouped updates for `uv` dependencies and GitHub Actions
 
@@ -295,7 +295,6 @@ The repository includes:
 - `scripts/`: local repository automation helpers
 - `tests/`: unit tests
 - `noxfile.py`: nox session matrix
-- `Dockerfile`: container image definition
 - `demo.tape`: VHS tape script for animated terminal demo
 - `AGENTS.md`: repository guidance for contributors and coding agents
 - `CONTRIBUTING.md`: contributor workflow and commit conventions

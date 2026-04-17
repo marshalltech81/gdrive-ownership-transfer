@@ -39,14 +39,13 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - `.editorconfig`: editor defaults for Python, YAML, TOML, JSON, and Markdown
 - `.pre-commit-config.yaml`: local contributor quality gates
 - `noxfile.py`: nox sessions for lint, format, typecheck, tests (Python 3.11–3.13), and bandit
-- `Dockerfile`: minimal `python:3.11-slim` image with uv; entrypoint is the CLI
 - `demo.tape`: VHS tape script for generating an animated terminal demo GIF
 
 ### GitHub Automation
 
 - `.github/workflows/ci.yml`: lint, type-check, tests, build, and Conventional Commit validation
 - `.github/workflows/security.yml`: Bandit and dependency audit checks
-- `.github/workflows/publish.yml`: build Python distributions, publish to PyPI, and push Docker image to GHCR on version tags
+- `.github/workflows/publish.yml`: build Python distributions and publish to PyPI on version tags
 - `.github/workflows/release.yml`: auto-generate GitHub Release notes on version tags
 - `.github/dependabot.yml`: automated dependency and GitHub Actions update policy
 - `SECURITY.md`: coordinated disclosure guidance
@@ -175,8 +174,6 @@ Changes are expected to keep these checks green:
 - Prefer pinned major versions for GitHub Actions and keep them updated through Dependabot.
 - Preserve `SECURITY.md` and private vulnerability reporting support.
 - If GitHub-side security settings are changed, keep the repository files aligned with those settings.
-- The GHCR Docker image is built and pushed automatically on version tags by `publish.yml`.
-
 ## Editing Guidance
 
 - Keep CLI output concise and actionable.
