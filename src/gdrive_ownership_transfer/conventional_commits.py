@@ -63,10 +63,16 @@ def read_commit_subjects_from_range(revision_range: str) -> list[str]:
     if not git_executable:
         raise RuntimeError("git executable not found on PATH")
 
-    completed = subprocess.run(
-        [git_executable, "log", "--format=%s", revision_range],
-        check=True,
-        capture_output=True,
-        text=True,
-    )  # nosec B603
+    try:
+        completed = subprocess.run(
+            [git_executable, "log", "--format=%s", revision_range],
+            check=True,
+            capture_output=True,
+            text=True,
+        )  # nosec B603
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else ""
+        raise RuntimeError(
+            f"git log failed for range {revision_range!r}" + (f": {stderr}" if stderr else "")
+        ) from exc
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]

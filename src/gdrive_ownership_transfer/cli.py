@@ -221,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="Run diagnostic checks: credentials, token, Drive API reachability, folder access.",
     )
-    add_common_args(doctor_parser)
+    add_doctor_args(doctor_parser)
 
     return parser
 
@@ -323,6 +323,27 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         metavar="REQ_PER_100S",
         default=None,
         help="Maximum Drive API requests per 100 seconds. Proactively sleeps to stay under quota.",
+    )
+
+
+def add_doctor_args(parser: argparse.ArgumentParser) -> None:
+    """Minimal args for the doctor subcommand (read-only diagnostics, no scan/mutation flags)."""
+    parser.add_argument(
+        "--folder-id",
+        required=True,
+        help="Drive folder ID to verify access against.",
+    )
+    parser.add_argument(
+        "--credentials-file",
+        type=Path,
+        default=Path("credentials.json"),
+        help="Path to the Desktop OAuth client JSON file.",
+    )
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=Path(".tokens/default.json"),
+        help="Path where the OAuth refresh token is cached.",
     )
 
 

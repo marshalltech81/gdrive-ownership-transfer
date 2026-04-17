@@ -171,6 +171,7 @@ Changes are expected to keep these checks green:
 - Prefer pinned major versions for GitHub Actions and keep them updated through Dependabot.
 - Preserve `SECURITY.md` and private vulnerability reporting support.
 - If GitHub-side security settings are changed, keep the repository files aligned with those settings.
+
 ## Editing Guidance
 
 - Keep CLI output concise and actionable.

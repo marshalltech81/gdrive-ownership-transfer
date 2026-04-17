@@ -55,11 +55,19 @@ def main(argv: list[str] | None = None) -> int:
     messages = list(args.message)
     for path_str in args.paths:
         path = Path(path_str)
-        lines = path.read_text(encoding="utf-8").splitlines()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print(f"Error: could not read commit message file {path}: {exc}", file=sys.stderr)
+            return 1
         messages.append(lines[0].strip() if lines else "")
 
     if args.revision_range:
-        messages.extend(read_commit_subjects_from_range(args.revision_range))
+        try:
+            messages.extend(read_commit_subjects_from_range(args.revision_range))
+        except (ValueError, RuntimeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
     if not messages:
         parser.error("provide at least one commit message source")

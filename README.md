@@ -137,7 +137,7 @@ uv run gdrive-ownership-transfer doctor \
 
 ## Common flags
 
-`scan`, `request`, `accept`, and `doctor` accept these optional flags:
+`scan`, `request`, and `accept` accept these optional flags:
 
 | Flag | Description |
 |------|-------------|
