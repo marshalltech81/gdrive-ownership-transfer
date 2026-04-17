@@ -20,6 +20,7 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - Prefer small, testable functions around planning, filtering, and reporting logic.
 - Keep dependencies lean and avoid adding heavy frameworks for a small CLI utility.
 - Optional features (e.g. `rich`) are soft dependencies gated behind `try/except ImportError` — the tool must work without them installed.
+- Prefer well-established libraries and standard patterns over custom implementations — do not reinvent the wheel. If the standard library or a well-known package already solves a problem correctly, use it.
 
 ## Current Architecture
 

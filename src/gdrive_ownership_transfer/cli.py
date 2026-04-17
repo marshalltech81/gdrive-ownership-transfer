@@ -253,12 +253,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Page size for Drive API list calls (1–1000).",
     )
     parser.add_argument(
-        "--max-items",
-        type=int,
-        default=None,
-        help="Optional cap on how many actionable items to mutate when --apply is used.",
-    )
-    parser.add_argument(
         "--filter-mime-type",
         action="append",
         dest="mime_types",
@@ -351,6 +345,12 @@ def add_doctor_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
     """Extra flags for request and accept subcommands."""
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=None,
+        help="Optional cap on how many items to mutate when --apply is used.",
+    )
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -607,14 +607,16 @@ def _warn_if_expiring_soon(credentials: Credentials) -> None:
     expiry = getattr(credentials, "expiry", None)
     if expiry is None:
         return
-    remaining = expiry.replace(tzinfo=UTC) - datetime.now(UTC)
+    expiry_aware = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=UTC)
+    remaining = expiry_aware - datetime.now(UTC)
     if remaining.total_seconds() < _EXPIRY_WARN_SECONDS:
         secs = int(remaining.total_seconds())
-        print(
-            f"Warning: OAuth token expires in {secs}s — consider deleting "
-            f"the token file and re-authenticating.",
-            file=sys.stderr,
-        )
+        suffix = "consider deleting the token file and re-authenticating."
+        if secs <= 0:
+            msg = f"Warning: OAuth token has already expired — {suffix}"
+        else:
+            msg = f"Warning: OAuth token expires in {secs}s — {suffix}"
+        print(msg, file=sys.stderr)
 
 
 def _ensure_token_fresh(credentials: Credentials) -> None:
@@ -622,7 +624,8 @@ def _ensure_token_fresh(credentials: Credentials) -> None:
     expiry = getattr(credentials, "expiry", None)
     if expiry is None:
         return
-    remaining = expiry.replace(tzinfo=UTC) - datetime.now(UTC)
+    expiry_aware = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=UTC)
+    remaining = expiry_aware - datetime.now(UTC)
     if remaining.total_seconds() < _EXPIRY_WARN_SECONDS and credentials.refresh_token:
         try:
             credentials.refresh(Request())
@@ -1461,7 +1464,7 @@ def run_doctor(
 
     def check(label: str, ok: bool, detail: str = "") -> None:
         nonlocal failures
-        symbol = "✓" if ok else "✗"
+        symbol = "OK" if ok else "FAIL"
         suffix = f"  ({detail})" if detail else ""
         print(f"  {symbol}  {label}{suffix}")
         if not ok:
@@ -1532,7 +1535,7 @@ def run_auth_revoke(*, token_file: Path) -> int:
 
     try:
         credentials = Credentials.from_authorized_user_file(str(token_file), SCOPES)
-        token = credentials.token or credentials.refresh_token
+        token = credentials.refresh_token or credentials.token
     except Exception as exc:
         print(f"Could not read token file: {exc}", file=sys.stderr)
         token = None

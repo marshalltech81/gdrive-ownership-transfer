@@ -159,6 +159,7 @@ uv run gdrive-ownership-transfer doctor \
 |------|-------------|
 | `--confirm` | Prompt for confirmation before applying any changes. |
 | `--concurrency N` | Number of parallel Drive API calls (default: 1). |
+| `--max-items N` | Cap the number of items mutated when `--apply` is used. |
 | `--checkpoint-file PATH` | JSON file to store completed item IDs for resuming an interrupted run. |
 | `--dry-run-diff` | Print a table of planned changes in dry-run mode (without `--apply`). |
 | `--interactive` | Prompt for confirmation on each item individually. |

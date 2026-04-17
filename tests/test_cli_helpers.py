@@ -2209,9 +2209,12 @@ def test_main_doctor_subcommand(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         [
             "gdrive-ownership-transfer",
             "doctor",
-            "--folder-id", "folder-123",
-            "--credentials-file", str(creds_file),
-            "--token-file", str(token_file),
+            "--folder-id",
+            "folder-123",
+            "--credentials-file",
+            str(creds_file),
+            "--token-file",
+            str(token_file),
         ],
     )
     result = main()
