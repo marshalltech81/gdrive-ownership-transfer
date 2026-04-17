@@ -23,7 +23,7 @@ def typecheck(session: nox.Session) -> None:
 
 @nox.session(python=PYTHON_VERSIONS)
 def tests(session: nox.Session) -> None:
-    session.run("uv", "run", "pytest", external=True)
+    session.run("uv", "run", "--python", session.python, "pytest", external=True)
 
 
 @nox.session(python=PYTHON_VERSIONS[0])

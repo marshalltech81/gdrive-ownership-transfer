@@ -989,8 +989,9 @@ def _run_loop(  # noqa: C901
             return row
 
         # Early bail without reserving a slot — exact cap enforcement happens below.
+        # Only gate in apply mode; dry-run should show all planned rows regardless.
         with count_lock:
-            if max_items is not None and attempted_ref[0] >= max_items:
+            if apply and max_items is not None and attempted_ref[0] >= max_items:
                 row["status"] = "skipped"
                 row["detail"] = f"{plan.detail}; max-items reached"
                 if not quiet:
