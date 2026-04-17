@@ -406,6 +406,17 @@ def main() -> int:  # noqa: C901
     if args.command == "revoke":
         return run_auth_revoke(token_file=args.token_file)
 
+    if args.command == "doctor":
+        credentials = load_credentials(args.credentials_file, args.token_file)
+        service = build_drive_service(credentials)
+        return run_doctor(
+            service,
+            credentials,
+            credentials_file=args.credentials_file,
+            token_file=args.token_file,
+            folder_id=args.folder_id,
+        )
+
     if args.page_size < 1 or args.page_size > 1000:
         raise SystemExit("--page-size must be between 1 and 1000.")
 
@@ -423,15 +434,6 @@ def main() -> int:  # noqa: C901
 
     credentials = load_credentials(args.credentials_file, args.token_file)
     service = build_drive_service(credentials)
-
-    if args.command == "doctor":
-        return run_doctor(
-            service,
-            credentials,
-            credentials_file=args.credentials_file,
-            token_file=args.token_file,
-            folder_id=args.folder_id,
-        )
 
     me = execute_with_retries(
         lambda: service.about().get(fields="user(emailAddress,displayName)").execute()
@@ -1544,7 +1546,9 @@ def run_auth_revoke(*, token_file: Path) -> int:
                 f"Warning: revoke returned HTTP {exc.code} — token may already be invalid.",
                 file=sys.stderr,
             )
-            revoked = True
+            # 4xx means the token is already invalid/expired — treat as effectively revoked.
+            # 5xx is a server error; the token may still be active, so don't claim success.
+            revoked = exc.code < 500
         except Exception as exc:
             print(f"Warning: could not reach revoke endpoint: {exc}", file=sys.stderr)
 

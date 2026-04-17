@@ -2164,6 +2164,60 @@ def test_main_revoke_missing_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert result == 1
 
 
+def test_main_doctor_subcommand(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from gdrive_ownership_transfer.cli import main
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    token_file = tmp_path / "token.json"
+
+    fake_creds = MagicMock()
+    fake_creds.valid = True
+    fake_creds.expiry = None
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.load_credentials",
+        lambda *_a, **_k: fake_creds,
+    )
+
+    fake_about = {"user": {"emailAddress": "me@example.com", "displayName": "Me"}}
+    fake_root = {
+        "id": "folder-123",
+        "name": "Shared",
+        "mimeType": "application/vnd.google-apps.folder",
+        "ownedByMe": True,
+        "driveId": None,
+    }
+
+    fake_service = MagicMock()
+    fake_service.about().get().execute.return_value = fake_about
+    fake_service.files().get().execute.return_value = fake_root
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.build_drive_service",
+        lambda _creds: fake_service,
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.run_doctor",
+        lambda *_a, **_k: 0,
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "doctor",
+            "--folder-id", "folder-123",
+            "--credentials-file", str(creds_file),
+            "--token-file", str(token_file),
+        ],
+    )
+    result = main()
+    assert result == 0
+
+
 # ---------------------------------------------------------------------------
 # run_diff — csv_b missing (not csv_a)
 # ---------------------------------------------------------------------------
