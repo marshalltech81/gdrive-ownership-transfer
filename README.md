@@ -122,7 +122,6 @@ The two positional arguments are the paths to the CSV reports. Pass `--key-field
 
 ```bash
 uv run gdrive-ownership-transfer revoke \
-  --credentials-file credentials.json \
   --token-file .tokens/token.json
 ```
 

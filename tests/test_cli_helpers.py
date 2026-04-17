@@ -2158,8 +2158,6 @@ def test_main_revoke_missing_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
             "revoke",
             "--token-file",
             str(tmp_path / "no_token.json"),
-            "--credentials-file",
-            str(tmp_path / "creds.json"),
         ],
     )
     result = main()

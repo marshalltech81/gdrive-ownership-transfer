@@ -211,12 +211,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Revoke the stored OAuth token and delete the local token file.",
     )
     revoke_parser.add_argument(
-        "--credentials-file",
-        type=Path,
-        default=Path("credentials.json"),
-        help="Path to the Desktop OAuth client JSON file.",
-    )
-    revoke_parser.add_argument(
         "--token-file",
         type=Path,
         default=Path(".tokens/default.json"),
@@ -354,7 +348,10 @@ def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run-diff",
         action="store_true",
-        help="Show planned mutations as a table instead of per-item lines.",
+        help=(
+            "Show planned mutations as a table instead of per-item lines"
+            " (dry-run only; ignored with --apply)."
+        ),
     )
     parser.add_argument(
         "--interactive",
@@ -538,7 +535,15 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
         return credentials
 
     if credentials and credentials.expired and credentials.refresh_token:
-        credentials.refresh(Request())
+        try:
+            credentials.refresh(Request())
+        except Exception:
+            print(
+                f"Warning: failed to refresh token from {token_file} — re-authenticating.",
+                file=sys.stderr,
+            )
+            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
+            credentials = flow.run_local_server(port=0)
     else:
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
         credentials = flow.run_local_server(port=0)
