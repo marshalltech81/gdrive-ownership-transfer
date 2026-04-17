@@ -2056,6 +2056,74 @@ def test_run_request_idempotency_skips_already_done(monkeypatch: pytest.MonkeyPa
     assert "idempotency" in rows[0]["detail"]
 
 
+def test_run_request_idempotency_proceeds_when_still_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = make_item()
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    # Re-fetch returns unchanged item — still needs transfer
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: {
+            "id": item.id,
+            "name": item.name,
+            "mimeType": item.mime_type,
+            "ownedByMe": item.owned_by_me,
+            "driveId": item.drive_id,
+            "permissions": list(item.permissions),
+        },
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        idempotency_check=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "applied"
+    assert calls == ["applied"]
+
+
+def test_run_request_idempotency_http_error_falls_back_to_original_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = make_item()
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: (_ for _ in ()).throw(make_http_error(403, "forbidden")),
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        idempotency_check=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "applied"
+    assert calls == ["applied"]
+
+
 # ---------------------------------------------------------------------------
 # main() — diff and revoke subcommands
 # ---------------------------------------------------------------------------
@@ -2453,3 +2521,94 @@ def test_run_request_max_items_quiet_suppresses_skip(
     captured = capsys.readouterr()
     assert "max-items reached" not in captured.out
     assert [r["status"] for r in rows] == ["applied", "skipped"]
+
+
+# ---------------------------------------------------------------------------
+# run_auth_revoke — unlink failure is handled gracefully
+# ---------------------------------------------------------------------------
+
+
+def test_run_auth_revoke_handles_unlink_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "token": "tok",
+                "refresh_token": "rtok",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "cid",
+                "client_secret": "csecret",  # pragma: allowlist secret
+                "scopes": ["https://www.googleapis.com/auth/drive"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.urllib.request.urlopen",
+        lambda *_a, **_k: _FakeResp(),
+    )
+
+    def _raise_oserror(*_a: object, **_k: object) -> None:
+        raise OSError("permission denied")
+
+    import pathlib
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _raise_oserror)
+
+    result = run_auth_revoke(
+        credentials_file=tmp_path / "creds.json",
+        token_file=token_file,
+    )
+    assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# _run_loop — credentials passed through to token refresh
+# ---------------------------------------------------------------------------
+
+
+def test_run_request_with_credentials_triggers_token_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    item = make_item()
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: None,
+    )
+    refresh_calls: list[object] = []
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli._ensure_token_fresh",
+        lambda creds: refresh_calls.append(creds),
+    )
+
+    fake_creds = MagicMock()
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        credentials=fake_creds,
+        **_COMMON,
+    )
+
+    assert rows[0]["status"] == "applied"
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0] is fake_creds

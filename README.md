@@ -151,7 +151,7 @@ uv run gdrive-ownership-transfer doctor \
 | `--quiet` | Suppress skipped-item lines; dry-run, applied, and error lines still print. |
 | `--page-size N` | Number of Drive API results per page (default: 100). |
 | `--token-file PATH` | Token file for OAuth credentials (default: `.tokens/default.json`). |
-| `--rate-limit N` | Maximum Drive API calls per 100 seconds (default: 100). |
+| `--rate-limit N` | Maximum Drive API calls per 100 seconds. Default: no proactive throttling. |
 | `--otlp-endpoint URL` | OpenTelemetry OTLP endpoint for distributed tracing (requires `opentelemetry-*` packages). |
 | `--notify-webhook URL` | POST a JSON run summary to this URL after the run completes. |
 
@@ -162,7 +162,7 @@ uv run gdrive-ownership-transfer doctor \
 | `--confirm` | Prompt for confirmation before applying any changes. |
 | `--concurrency N` | Number of parallel Drive API calls (default: 1). |
 | `--checkpoint-file PATH` | JSON file to store completed item IDs for resuming an interrupted run. |
-| `--dry-run-diff` | Print a table of planned changes before applying. |
+| `--dry-run-diff` | Print a table of planned changes in dry-run mode (without `--apply`). |
 | `--interactive` | Prompt for confirmation on each item individually. |
 | `--idempotency-check` | Re-fetch each item from the API before applying to avoid duplicate mutations. |
 

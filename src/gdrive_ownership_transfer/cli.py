@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -386,6 +387,8 @@ def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
 
 def main() -> int:  # noqa: C901
     global _rate_bucket, _tracer
+    _rate_bucket = None
+    _tracer = None
 
     parser = build_parser()
     args = parser.parse_args()
@@ -996,6 +999,7 @@ def _run_loop(  # noqa: C901
                     print(f"[skip] {item.path} :: {plan.detail}", file=_out)
             return row
 
+        # Early bail without reserving a slot — exact cap enforcement happens below.
         with count_lock:
             if max_items is not None and attempted_ref[0] >= max_items:
                 row["status"] = "skipped"
@@ -1004,10 +1008,6 @@ def _run_loop(  # noqa: C901
                     with print_lock:
                         print(f"[skip] {item.path} :: max-items reached", file=_out)
                 return row
-            # Increment inside the same lock section to prevent a race where
-            # multiple concurrent workers pass the cap check simultaneously.
-            if apply:
-                attempted_ref[0] += 1
 
         if not apply:
             row["status"] = "dry-run"
@@ -1057,6 +1057,18 @@ def _run_loop(  # noqa: C901
                 plan_to_use = plan
         else:
             plan_to_use = plan
+
+        # Reserve a slot atomically right before the API call so interactive/
+        # idempotency skips do not consume a max-items slot.
+        with count_lock:
+            if max_items is not None and attempted_ref[0] >= max_items:
+                row["status"] = "skipped"
+                row["detail"] = f"{plan.detail}; max-items reached"
+                if not quiet:
+                    with print_lock:
+                        print(f"[skip] {item.path} :: max-items reached", file=_out)
+                return row
+            attempted_ref[0] += 1
 
         # Proactive token refresh mid-run
         if credentials is not None:
@@ -1497,9 +1509,14 @@ def run_auth_revoke(*, credentials_file: Path, token_file: Path) -> int:
 
     revoked = False
     if token:
-        revoke_url = f"https://accounts.google.com/o/oauth2/revoke?token={token}"
+        body = urllib.parse.urlencode({"token": token}).encode("ascii")
         try:
-            req = urllib.request.Request(revoke_url, method="POST")  # nosec B310
+            req = urllib.request.Request(  # nosec B310
+                "https://accounts.google.com/o/oauth2/revoke",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
                 revoked = resp.status == 200
         except urllib.error.HTTPError as exc:
