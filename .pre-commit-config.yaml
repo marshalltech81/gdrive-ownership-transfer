@@ -1,0 +1,76 @@
+minimum_pre_commit_version: "4.2.0"
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+  - commit-msg
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.25
+    hooks:
+      - id: validate-pyproject
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        always_run: true
+        entry: uv run ruff check .
+        language: system
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format --check
+        always_run: true
+        entry: uv run ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: pyright
+        name: pyright src
+        always_run: true
+        entry: uv run pyright src
+        language: system
+        pass_filenames: false
+      - id: pytest
+        name: pytest
+        always_run: true
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages:
+          - pre-push
+      - id: bandit
+        name: bandit
+        always_run: true
+        entry: uv run bandit -q -r src
+        language: system
+        pass_filenames: false
+        stages:
+          - pre-push
+      - id: conventional-commit
+        name: conventional commit
+        entry: uv run python scripts/check_conventional_commit.py
+        language: system
+        stages:
+          - commit-msg
+        pass_filenames: true

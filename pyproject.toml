@@ -1,0 +1,75 @@
+[project]
+name = "gdrive-ownership-transfer"
+version = "0.1.0"
+description = "Bulk initiate and accept Google Drive ownership transfers inside a shared folder tree."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "MarshallTech81" },
+]
+dependencies = [
+  "google-api-python-client>=2.170.0",
+  "google-auth-oauthlib>=1.2.1",
+]
+
+[dependency-groups]
+dev = [
+  "bandit[toml]>=1.9.4",
+  "nox>=2024.10.9",
+  "pyright>=1.1.400",
+  "pip-audit>=2.9.0",
+  "pre-commit>=4.2.0",
+  "pytest>=8.3.5",
+  "pytest-cov>=6.1.1",
+  "rich>=13.0.0",
+  "ruff>=0.11.9",
+]
+
+[project.scripts]
+gdrive-ownership-transfer = "gdrive_ownership_transfer.cli:main"
+
+
+[build-system]
+requires = ["hatchling>=1.29.0"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=gdrive_ownership_transfer --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingImports = "warning"
+reportMissingTypeStubs = "none"
+reportMissingParameterType = "error"
+reportUntypedFunctionDecorator = "error"
+reportUnnecessaryCast = "warning"
+reportUnnecessaryTypeIgnoreComment = "warning"
+
+[tool.coverage.run]
+branch = true
+source = ["gdrive_ownership_transfer"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+targets = ["src"]
