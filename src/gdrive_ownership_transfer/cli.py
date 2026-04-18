@@ -1667,7 +1667,7 @@ def run_auth_revoke(*, token_file: Path) -> int:
         body = urllib.parse.urlencode({"token": token}).encode("ascii")
         try:
             req = urllib.request.Request(  # nosec B310
-                "https://accounts.google.com/o/oauth2/revoke",
+                "https://oauth2.googleapis.com/revoke",
                 data=body,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 method="POST",
@@ -1695,6 +1695,8 @@ def run_auth_revoke(*, token_file: Path) -> int:
 
     if revoked:
         print("OAuth token revoked successfully.")
+    elif token is None:
+        print("OAuth token file removed (no token could be loaded, nothing sent to Google).")
     else:
         print("OAuth token file removed (revocation may not have completed).")
     return 0 if deleted else 1

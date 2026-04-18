@@ -2314,29 +2314,28 @@ def test_run_diff_csv_b_missing(tmp_path: Path) -> None:
 
 
 def test_run_auth_revoke_handles_corrupt_token_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     token_file = tmp_path / "bad_token.json"
     token_file.write_text("not-valid-json", encoding="utf-8")
 
-    class _FakeResp:
-        status = 200
+    urlopen_calls: list[object] = []
 
-        def __enter__(self) -> _FakeResp:
-            return self
+    def _spy(*_a: object, **_k: object) -> None:
+        urlopen_calls.append(True)
 
-        def __exit__(self, *_: object) -> None:
-            pass
-
-    monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.urllib.request.urlopen",
-        lambda *_a, **_k: _FakeResp(),
-    )
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _spy)
 
     result = run_auth_revoke(token_file=token_file)
     # Token unreadable → token=None → revoke skipped → file still deleted
     assert result == 0
     assert not token_file.exists()
+    assert urlopen_calls == [], "urlopen must not be called when no token could be loaded"
+    captured = capsys.readouterr()
+    assert "no token could be loaded" in captured.out
+    assert "revocation may not have completed" not in captured.out
 
 
 def test_run_auth_revoke_handles_http_error_from_revoke(
