@@ -2194,6 +2194,46 @@ def test_run_request_idempotency_http_error_falls_back_to_original_plan(
     assert calls == ["applied"]
 
 
+def test_run_request_idempotency_unexpected_error_falls_back_with_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Non-HTTP exceptions during idempotency re-check must not abort the run.
+
+    Transport errors (OSError, SSLError) and malformed payloads (KeyError from
+    _dict_to_drive_item) are unexpected but recoverable: fall back to the
+    original plan with a warning instead of letting the exception escape.
+    """
+
+    item = make_item()
+    calls: list[str] = []
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: [item])
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.get_file",
+        lambda *_a, **_k: (_ for _ in ()).throw(ConnectionError("socket reset")),
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda *_a, **_k: calls.append("applied"),
+    )
+
+    rows = run_request(
+        object(),
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        idempotency_check=True,
+        **_COMMON,
+    )
+    assert rows[0]["status"] == "applied"
+    assert calls == ["applied"]
+    err = capsys.readouterr().err
+    assert "idempotency re-check failed" in err
+    assert "ConnectionError" in err
+
+
 # ---------------------------------------------------------------------------
 # main() — diff and revoke subcommands
 # ---------------------------------------------------------------------------

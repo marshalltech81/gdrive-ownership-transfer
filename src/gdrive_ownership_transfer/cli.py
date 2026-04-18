@@ -1059,6 +1059,17 @@ def _apply_single(  # noqa: C901
                 return row
             plan_to_use = fresh_plan
         except HttpError:
+            # Expected transient failure — fall back to the original plan silently.
+            plan_to_use = plan
+        except Exception as exc:
+            # Transport errors, malformed payloads, etc. — don't abort the whole
+            # run. Warn and proceed with the plan we already had.
+            with ctx.print_lock:
+                print(
+                    f"Warning: idempotency re-check failed for {item.path}: "
+                    f"{exc.__class__.__name__}: {exc}. Falling back to original plan.",
+                    file=sys.stderr,
+                )
             plan_to_use = plan
     else:
         plan_to_use = plan
