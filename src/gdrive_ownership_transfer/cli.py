@@ -431,6 +431,10 @@ def main() -> int:  # noqa: C901
     if getattr(args, "concurrency", 1) < 1:
         raise SystemExit("--concurrency must be at least 1.")
 
+    _max_items = getattr(args, "max_items", None)
+    if _max_items is not None and _max_items < 1:
+        raise SystemExit("--max-items must be a positive integer.")
+
     if getattr(args, "interactive", False) and getattr(args, "concurrency", 1) > 1:
         raise SystemExit("--interactive cannot be combined with --concurrency > 1.")
 

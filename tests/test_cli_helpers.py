@@ -2487,6 +2487,28 @@ def test_main_rejects_interactive_with_concurrency(
         main()
 
 
+def test_main_rejects_invalid_max_items(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from gdrive_ownership_transfer.cli import main
+
+    creds_file = tmp_path / "creds.json"
+    creds_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gdrive-ownership-transfer",
+            "request",
+            "--folder-id",
+            "folder-1",
+            "--credentials-file",
+            str(creds_file),
+            "--max-items",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit, match="max-items"):
+        main()
+
+
 def test_main_rejects_invalid_rate_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from gdrive_ownership_transfer.cli import main
 
@@ -2641,10 +2663,6 @@ def test_run_auth_revoke_handles_unlink_error(
     # run_auth_revoke uses urllib.request.urlopen to revoke, not Credentials.revoke.
     from types import SimpleNamespace
 
-    monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.urllib.request.urlopen",
-        lambda *_a, **_k: SimpleNamespace(status=200).__enter__().__class__,
-    )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.urllib.request.urlopen",
         lambda *_a, **_k: SimpleNamespace(
