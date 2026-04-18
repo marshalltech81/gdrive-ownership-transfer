@@ -12,7 +12,7 @@ class DummyRequest:
     def __init__(self, payload: object) -> None:
         self.payload = payload
 
-    def execute(self) -> object:
+    def execute(self, **_kw: object) -> object:
         return self.payload
 
 
@@ -26,12 +26,23 @@ class DummyFilesApi:
         return DummyRequest(self.payload)
 
 
+class DummyAboutApi:
+    def __init__(self, email: str = "dummy@example.com") -> None:
+        self.email = email
+
+    def get(self, **_kw: object) -> DummyRequest:
+        return DummyRequest({"user": {"emailAddress": self.email, "displayName": "Dummy"}})
+
+
 class DummyService:
     def __init__(self, payload: object) -> None:
         self.files_api = DummyFilesApi(payload)
 
     def files(self) -> DummyFilesApi:
         return self.files_api
+
+    def about(self) -> DummyAboutApi:
+        return DummyAboutApi()
 
 
 class FakeCredentials:
@@ -218,11 +229,11 @@ def test_main_scan_branch_writes_report(
     )
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",
@@ -252,11 +263,11 @@ def test_main_request_branch_infers_target_email(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("sys.argv", ["prog", "request", "--folder-id", "folder-123"])
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",
@@ -287,11 +298,11 @@ def test_main_accept_branch_uses_authenticated_user_email(
     monkeypatch.setattr("sys.argv", ["prog", "accept", "--folder-id", "folder-123"])
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com", "displayName": "Me"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",
@@ -317,11 +328,11 @@ def test_main_rejects_non_folder_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["prog", "scan", "--folder-id", "file-123"])
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",
@@ -340,11 +351,11 @@ def test_main_rejects_shared_drive_root(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("sys.argv", ["prog", "scan", "--folder-id", "folder-123"])
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",
@@ -367,11 +378,11 @@ def test_main_rejects_invalid_page_size(monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr("gdrive_ownership_transfer.cli.load_credentials", lambda *_args: object())
     monkeypatch.setattr(
-        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: object()
+        "gdrive_ownership_transfer.cli.build_drive_service", lambda _creds: DummyService({})
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.execute_with_retries",
-        lambda _fn: {"user": {"emailAddress": "me@example.com"}},
+        lambda _fn, **_kw: {"user": {"emailAddress": "me@example.com"}},
     )
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.get_file",

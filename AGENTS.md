@@ -89,6 +89,13 @@ These should not change casually:
 - Conflict detection in `plan_request` must surface other pending-owner conflicts rather than silently overwriting them.
 - Idempotency checks must re-fetch the item from the API before applying to prevent duplicate mutations.
 
+## Toolchain Divergences from Org Defaults
+
+The org-wide `AGENTS.md` lists `pyright` as the default static type checker for Python projects.
+This repository uses `mypy` instead. The choice predates the org default and is intentional: mypy
+is already configured in `pyproject.toml`, integrated into `pre-commit`, and run in CI.
+Do not migrate to `pyright` unless the task explicitly includes toolchain modernization.
+
 ## Workflow Expectations
 
 Use these commands unless the task specifically requires something else:
