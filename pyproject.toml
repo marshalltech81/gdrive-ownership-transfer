@@ -29,8 +29,6 @@ dev = [
 [project.scripts]
 gdrive-ownership-transfer = "gdrive_ownership_transfer.cli:main"
 
-[tool.uv]
-default-groups = ["dev"]
 
 [build-system]
 requires = ["hatchling>=1.29.0"]

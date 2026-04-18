@@ -24,6 +24,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import HttpRequest
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -53,7 +54,6 @@ except ImportError:
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
-RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _EXPIRY_WARN_SECONDS = 300
 _IDEMPOTENCY_FIELDS = (
     "id,name,mimeType,ownedByMe,driveId,permissions(id,type,emailAddress,role,pendingOwner)"
@@ -61,7 +61,9 @@ _IDEMPOTENCY_FIELDS = (
 
 ActionType = Literal["skip", "create-permission", "update-permission", "accept-transfer"]
 
-_rate_bucket: TokenBucket | None = None
+# Number of retries passed to googleapiclient for 429/5xx errors, separate from
+# the outer retry loop in execute_with_retries which handles 403 quota errors.
+_INNER_RETRIES: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -394,9 +396,6 @@ def _add_mutation_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:  # noqa: C901
-    global _rate_bucket
-    _rate_bucket = None
-
     parser = build_parser()
     args = parser.parse_args()
 
@@ -405,6 +404,12 @@ def main() -> int:  # noqa: C901
 
     if args.command == "revoke":
         return run_auth_revoke(token_file=args.token_file)
+
+    # doctor has no --rate-limit flag; getattr guards against AttributeError.
+    _rate_limit = getattr(args, "rate_limit", None)
+    if _rate_limit is not None and _rate_limit <= 0:
+        raise SystemExit("--rate-limit must be a positive number.")
+    rate_bucket: TokenBucket | None = TokenBucket(_rate_limit) if _rate_limit else None
 
     if args.command == "doctor":
         credentials = load_credentials(args.credentials_file, args.token_file)
@@ -415,6 +420,7 @@ def main() -> int:  # noqa: C901
             credentials_file=args.credentials_file,
             token_file=args.token_file,
             folder_id=args.folder_id,
+            rate_bucket=rate_bucket,
         )
 
     if args.page_size < 1 or args.page_size > 1000:
@@ -426,17 +432,12 @@ def main() -> int:  # noqa: C901
     if getattr(args, "interactive", False) and getattr(args, "concurrency", 1) > 1:
         raise SystemExit("--interactive cannot be combined with --concurrency > 1.")
 
-    if getattr(args, "rate_limit", None) is not None and args.rate_limit <= 0:
-        raise SystemExit("--rate-limit must be a positive number.")
-
-    if args.rate_limit:
-        _rate_bucket = TokenBucket(args.rate_limit)
-
     credentials = load_credentials(args.credentials_file, args.token_file)
     service = build_drive_service(credentials)
 
     me = execute_with_retries(
-        lambda: service.about().get(fields="user(emailAddress,displayName)").execute()
+        service.about().get(fields="user(emailAddress,displayName)"),
+        rate_bucket=rate_bucket,
     )["user"]
     root = get_file(
         service,
@@ -446,6 +447,7 @@ def main() -> int:  # noqa: C901
             "owners(emailAddress,displayName),"
             "permissions(id,type,emailAddress,role,pendingOwner)"
         ),
+        rate_bucket=rate_bucket,
     )
 
     if root["mimeType"] != FOLDER_MIME_TYPE:
@@ -492,6 +494,7 @@ def main() -> int:  # noqa: C901
             interactive=args.interactive,
             idempotency_check=args.idempotency_check,
             credentials=credentials,
+            rate_bucket=rate_bucket,
             **common,
         )
     elif args.command == "accept":
@@ -509,6 +512,7 @@ def main() -> int:  # noqa: C901
             interactive=args.interactive,
             idempotency_check=args.idempotency_check,
             credentials=credentials,
+            rate_bucket=rate_bucket,
             **common,
         )
     else:
@@ -642,12 +646,23 @@ def build_drive_service(credentials: Credentials) -> Resource:
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
-def execute_with_retries(request_fn: Callable[[], Any], attempts: int = 5) -> Any:
+def execute_with_retries(
+    request: HttpRequest,
+    attempts: int = 5,
+    *,
+    rate_bucket: TokenBucket | None = None,
+) -> Any:
+    """Execute a Drive API request with rate limiting and retry for 403 rate-limit errors.
+
+    429 and 5xx retries are handled by googleapiclient's built-in num_retries
+    (_INNER_RETRIES). The outer loop handles 403 quota errors that num_retries
+    does not cover.
+    """
     for attempt in range(attempts):
+        if rate_bucket is not None:
+            rate_bucket.acquire()
         try:
-            if _rate_bucket is not None:
-                _rate_bucket.acquire()
-            return request_fn()
+            return request.execute(num_retries=_INNER_RETRIES)
         except HttpError as exc:
             if not is_retryable(exc) or attempt == attempts - 1:
                 raise
@@ -656,17 +671,13 @@ def execute_with_retries(request_fn: Callable[[], Any], attempts: int = 5) -> An
 
 
 def is_retryable(exc: HttpError) -> bool:
-    status = getattr(exc.resp, "status", None)
-    if status in RETRYABLE_STATUSES:
-        return True
-    if status != 403:
+    """Return True for 403 Drive quota errors not covered by googleapiclient's num_retries."""
+    if getattr(exc.resp, "status", None) != 403:
         return False
-
     try:
         payload = json.loads(exc.content.decode("utf-8"))
     except Exception:
         return False
-
     reasons = {
         error.get("reason", "")
         for error in payload.get("error", {}).get("errors", [])
@@ -675,13 +686,18 @@ def is_retryable(exc: HttpError) -> bool:
     return bool(reasons & {"userRateLimitExceeded", "rateLimitExceeded", "backendError"})
 
 
-def get_file(service: Resource, file_id: str, fields: str) -> dict[str, Any]:
+def get_file(
+    service: Resource,
+    file_id: str,
+    fields: str,
+    *,
+    rate_bucket: TokenBucket | None = None,
+) -> dict[str, Any]:
     return cast(
         dict[str, Any],
         execute_with_retries(
-            lambda: (
-                service.files().get(fileId=file_id, supportsAllDrives=True, fields=fields).execute()
-            )
+            service.files().get(fileId=file_id, supportsAllDrives=True, fields=fields),
+            rate_bucket=rate_bucket,
         ),
     )
 
@@ -742,7 +758,13 @@ def save_checkpoint(path: Path, completed_ids: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> Iterator[DriveItem]:
+def walk_tree(
+    service: Resource,
+    root: dict[str, Any],
+    page_size: int,
+    *,
+    rate_bucket: TokenBucket | None = None,
+) -> Iterator[DriveItem]:
     stack: list[tuple[dict[str, Any], str]] = [(root, root["name"])]
     seen_ids: set[str] = set()
 
@@ -767,13 +789,19 @@ def walk_tree(service: Resource, root: dict[str, Any], page_size: int) -> Iterat
         if not item.is_folder:
             continue
 
-        children = list_children(service, current_id, page_size=page_size)
+        children = list_children(service, current_id, page_size=page_size, rate_bucket=rate_bucket)
         for child in reversed(children):
             child_path = f"{current_path}/{child['name']}"
             stack.append((child, child_path))
 
 
-def list_children(service: Resource, parent_id: str, page_size: int) -> list[dict[str, Any]]:
+def list_children(
+    service: Resource,
+    parent_id: str,
+    page_size: int,
+    *,
+    rate_bucket: TokenBucket | None = None,
+) -> list[dict[str, Any]]:
     children: list[dict[str, Any]] = []
     page_token: str | None = None
     fields = (
@@ -784,24 +812,15 @@ def list_children(service: Resource, parent_id: str, page_size: int) -> list[dic
     )
 
     while True:
-        page_token_for_request = page_token
-
-        def request_page(page_token: str | None = page_token_for_request) -> dict[str, Any]:
-            return cast(
-                dict[str, Any],
-                service.files()
-                .list(
-                    q=f"'{parent_id}' in parents and trashed = false",
-                    fields=fields,
-                    includeItemsFromAllDrives=True,
-                    supportsAllDrives=True,
-                    pageSize=page_size,
-                    pageToken=page_token,
-                )
-                .execute(),
-            )
-
-        response = execute_with_retries(request_page)
+        request = service.files().list(
+            q=f"'{parent_id}' in parents and trashed = false",
+            fields=fields,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            pageSize=page_size,
+            pageToken=page_token,
+        )
+        response = cast(dict[str, Any], execute_with_retries(request, rate_bucket=rate_bucket))
         children.extend(response.get("files", []))
         page_token = response.get("nextPageToken")
         if not page_token:
@@ -817,6 +836,7 @@ def _collect_items_with_progress(
     *,
     page_size: int,
     output_format: str,
+    rate_bucket: TokenBucket | None = None,
 ) -> list[DriveItem]:
     items: list[DriveItem] = []
 
@@ -829,14 +849,14 @@ def _collect_items_with_progress(
             transient=True,
         ) as progress:
             task = progress.add_task("[cyan]Scanning…", total=None)
-            for item in walk_tree(service, root, page_size=page_size):
+            for item in walk_tree(service, root, page_size=page_size, rate_bucket=rate_bucket):
                 items.append(item)
                 progress.update(task, completed=len(items), description="[cyan]Scanning…")
         print(f"[scanning] {len(items)} items found.", file=sys.stderr)
         return items
 
     use_progress = output_format == "text" and sys.stderr.isatty()
-    for item in walk_tree(service, root, page_size=page_size):
+    for item in walk_tree(service, root, page_size=page_size, rate_bucket=rate_bucket):
         items.append(item)
         if use_progress:
             print(f"\r[scanning] {len(items)} items...", end="", file=sys.stderr, flush=True)
@@ -895,11 +915,155 @@ def run_scan(
 
 
 # ---------------------------------------------------------------------------
+# _apply_single
+# ---------------------------------------------------------------------------
+
+
+def _apply_single(  # noqa: C901
+    item: DriveItem,
+    plan: ActionPlan,
+    *,
+    apply: bool,
+    quiet: bool,
+    out: Any,
+    max_items: int | None,
+    idempotency_check: bool,
+    interactive: bool,
+    service: Resource,
+    plan_fn: Callable[[DriveItem], ActionPlan],
+    apply_fn: Callable[[DriveItem, ActionPlan], None],
+    credentials: Credentials | None,
+    checkpoint_file: Path | None,
+    completed_ids: set[str],
+    checkpoint_lock: threading.Lock,
+    attempted_ref: list[int],
+    count_lock: threading.Lock,
+    print_lock: threading.Lock,
+    rate_bucket: TokenBucket | None,
+) -> dict[str, str]:
+    row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
+
+    if plan.action == "skip":
+        row["status"] = "skipped"
+        if not quiet:
+            with print_lock:
+                print(f"[skip] {item.path} :: {plan.detail}", file=out)
+        return row
+
+    # Early bail without reserving a slot — exact cap enforcement happens below.
+    # Only gate in apply mode; dry-run should show all planned rows regardless.
+    with count_lock:
+        if apply and max_items is not None and attempted_ref[0] >= max_items:
+            row["status"] = "skipped"
+            row["detail"] = f"{plan.detail}; max-items reached"
+            if not quiet:
+                with print_lock:
+                    print(f"[skip] {item.path} :: max-items reached", file=out)
+            return row
+
+    if not apply:
+        row["status"] = "dry-run"
+        with print_lock:
+            print(f"[dry-run] {item.path} :: {plan.detail}", file=out)
+        return row
+
+    # Interactive per-item confirmation
+    if interactive:
+        with print_lock:
+            if _RICH_AVAILABLE and _rich_err_console is not None:
+                if not _RichConfirm.ask(
+                    f"[bold]{item.path}[/bold] — {plan.action}: {plan.detail} — Apply?",
+                    console=_rich_err_console,
+                    default=False,
+                ):
+                    row["status"] = "skipped"
+                    row["detail"] = "skipped interactively"
+                    return row
+            else:
+                print(
+                    f"[interactive] {item.path} :: {plan.action}: {plan.detail}\nApply? [y/N] ",
+                    end="",
+                    flush=True,
+                    file=sys.stderr,
+                )
+                try:
+                    answer = input().strip().lower()
+                except EOFError:
+                    answer = ""
+                if answer != "y":
+                    row["status"] = "skipped"
+                    row["detail"] = "skipped interactively"
+                    return row
+
+    # Idempotency re-check before applying
+    if idempotency_check:
+        try:
+            fresh_data = get_file(
+                service, item.id, fields=_IDEMPOTENCY_FIELDS, rate_bucket=rate_bucket
+            )
+            fresh_item = _dict_to_drive_item(fresh_data, item.path)
+            fresh_plan = plan_fn(fresh_item)
+            if fresh_plan.action == "skip":
+                row["status"] = "skipped"
+                row["detail"] = f"idempotency check: {fresh_plan.detail}"
+                if not quiet:
+                    with print_lock:
+                        print(f"[skip] {item.path} :: {row['detail']}", file=out)
+                return row
+            plan_to_use = fresh_plan
+        except HttpError:
+            plan_to_use = plan
+    else:
+        plan_to_use = plan
+
+    # Reflect the actual plan (may differ from initial after idempotency re-check).
+    row["action"] = plan_to_use.action
+    row["detail"] = plan_to_use.detail
+
+    # Reserve a slot atomically right before the API call so interactive/
+    # idempotency skips do not consume a max-items slot.
+    with count_lock:
+        if max_items is not None and attempted_ref[0] >= max_items:
+            row["status"] = "skipped"
+            row["detail"] = f"{plan_to_use.detail}; max-items reached"
+            if not quiet:
+                with print_lock:
+                    print(f"[skip] {item.path} :: max-items reached", file=out)
+            return row
+        attempted_ref[0] += 1
+
+    # Proactive token refresh mid-run
+    if credentials is not None:
+        _ensure_token_fresh(credentials)
+
+    try:
+        apply_fn(item, plan_to_use)
+        row["status"] = "applied"
+        with print_lock:
+            print(f"[applied] {item.path} :: {plan_to_use.detail}", file=out)
+        if checkpoint_file is not None:
+            with checkpoint_lock:
+                completed_ids.add(item.id)
+                save_checkpoint(checkpoint_file, completed_ids)
+    except HttpError as exc:
+        row["status"] = "error"
+        row["detail"] = format_http_error(exc)
+        with print_lock:
+            print(f"[error] {item.path} :: {row['detail']}", file=out)
+    except Exception as exc:
+        row["status"] = "error"
+        row["detail"] = str(exc) or exc.__class__.__name__
+        with print_lock:
+            print(f"[error] {item.path} :: {row['detail']}", file=out)
+    return row
+
+
+# ---------------------------------------------------------------------------
 # _run_loop
 # ---------------------------------------------------------------------------
 
 
-def _run_loop(  # noqa: C901
+def _run_loop(
     service: Resource,
     root: dict[str, Any],
     *,
@@ -921,6 +1085,7 @@ def _run_loop(  # noqa: C901
     plan_fn: Callable[[DriveItem], ActionPlan],
     apply_fn: Callable[[DriveItem, ActionPlan], None],
     credentials: Credentials | None = None,
+    rate_bucket: TokenBucket | None = None,
 ) -> list[dict[str, str]]:
     _out = sys.stderr if output_format == "json" else sys.stdout
 
@@ -934,7 +1099,7 @@ def _run_loop(  # noqa: C901
             )
 
     all_items = _collect_items_with_progress(
-        service, root, page_size=page_size, output_format=output_format
+        service, root, page_size=page_size, output_format=output_format, rate_bucket=rate_bucket
     )
     items = _apply_filters(
         all_items,
@@ -980,137 +1145,35 @@ def _run_loop(  # noqa: C901
         return rows
 
     checkpoint_lock = threading.Lock()
-
-    def _apply_single(
-        item: DriveItem,
-        plan: ActionPlan,
-        attempted_ref: list[int],
-        count_lock: threading.Lock,
-        print_lock: threading.Lock,
-    ) -> dict[str, str]:
-        row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
-
-        if plan.action == "skip":
-            row["status"] = "skipped"
-            if not quiet:
-                with print_lock:
-                    print(f"[skip] {item.path} :: {plan.detail}", file=_out)
-            return row
-
-        # Early bail without reserving a slot — exact cap enforcement happens below.
-        # Only gate in apply mode; dry-run should show all planned rows regardless.
-        with count_lock:
-            if apply and max_items is not None and attempted_ref[0] >= max_items:
-                row["status"] = "skipped"
-                row["detail"] = f"{plan.detail}; max-items reached"
-                if not quiet:
-                    with print_lock:
-                        print(f"[skip] {item.path} :: max-items reached", file=_out)
-                return row
-
-        if not apply:
-            row["status"] = "dry-run"
-            with print_lock:
-                print(f"[dry-run] {item.path} :: {plan.detail}", file=_out)
-            return row
-
-        # Interactive per-item confirmation
-        if interactive:
-            with print_lock:
-                if _RICH_AVAILABLE and _rich_err_console is not None:
-                    if not _RichConfirm.ask(
-                        f"[bold]{item.path}[/bold] — {plan.action}: {plan.detail} — Apply?",
-                        console=_rich_err_console,
-                        default=False,
-                    ):
-                        row["status"] = "skipped"
-                        row["detail"] = "skipped interactively"
-                        return row
-                else:
-                    print(
-                        f"[interactive] {item.path} :: {plan.action}: {plan.detail}\nApply? [y/N] ",
-                        end="",
-                        flush=True,
-                        file=sys.stderr,
-                    )
-                    try:
-                        answer = input().strip().lower()
-                    except EOFError:
-                        answer = ""
-                    if answer != "y":
-                        row["status"] = "skipped"
-                        row["detail"] = "skipped interactively"
-                        return row
-
-        # Idempotency re-check before applying
-        if idempotency_check:
-            try:
-                fresh_data = get_file(service, item.id, fields=_IDEMPOTENCY_FIELDS)
-                fresh_item = _dict_to_drive_item(fresh_data, item.path)
-                fresh_plan = plan_fn(fresh_item)
-                if fresh_plan.action == "skip":
-                    row["status"] = "skipped"
-                    row["detail"] = f"idempotency check: {fresh_plan.detail}"
-                    if not quiet:
-                        with print_lock:
-                            print(f"[skip] {item.path} :: {row['detail']}", file=_out)
-                    return row
-                plan_to_use = fresh_plan
-            except HttpError:
-                plan_to_use = plan
-        else:
-            plan_to_use = plan
-
-        # Reflect the actual plan (may differ from initial after idempotency re-check).
-        row["action"] = plan_to_use.action
-        row["detail"] = plan_to_use.detail
-
-        # Reserve a slot atomically right before the API call so interactive/
-        # idempotency skips do not consume a max-items slot.
-        with count_lock:
-            if max_items is not None and attempted_ref[0] >= max_items:
-                row["status"] = "skipped"
-                row["detail"] = f"{plan_to_use.detail}; max-items reached"
-                if not quiet:
-                    with print_lock:
-                        print(f"[skip] {item.path} :: max-items reached", file=_out)
-                return row
-            attempted_ref[0] += 1
-
-        # Proactive token refresh mid-run
-        if credentials is not None:
-            _ensure_token_fresh(credentials)
-
-        try:
-            apply_fn(item, plan_to_use)
-            row["status"] = "applied"
-            with print_lock:
-                print(f"[applied] {item.path} :: {plan_to_use.detail}", file=_out)
-            if checkpoint_file is not None:
-                with checkpoint_lock:
-                    completed_ids.add(item.id)
-                    save_checkpoint(checkpoint_file, completed_ids)
-        except HttpError as exc:
-            row["status"] = "error"
-            row["detail"] = format_http_error(exc)
-            with print_lock:
-                print(f"[error] {item.path} :: {row['detail']}", file=_out)
-        except Exception as exc:
-            row["status"] = "error"
-            row["detail"] = str(exc) or exc.__class__.__name__
-            with print_lock:
-                print(f"[error] {item.path} :: {row['detail']}", file=_out)
-        return row
-
     attempted_ref = [0]
     count_lock = threading.Lock()
     print_lock = threading.Lock()
     rows = []
 
+    single_kwargs: dict[str, Any] = dict(
+        apply=apply,
+        quiet=quiet,
+        out=_out,
+        max_items=max_items,
+        idempotency_check=idempotency_check,
+        interactive=interactive,
+        service=service,
+        plan_fn=plan_fn,
+        apply_fn=apply_fn,
+        credentials=credentials,
+        checkpoint_file=checkpoint_file,
+        completed_ids=completed_ids,
+        checkpoint_lock=checkpoint_lock,
+        attempted_ref=attempted_ref,
+        count_lock=count_lock,
+        print_lock=print_lock,
+        rate_bucket=rate_bucket,
+    )
+
     if concurrency > 1 and apply:
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_idx = {
-                executor.submit(_apply_single, item, plan, attempted_ref, count_lock, print_lock): i
+                executor.submit(_apply_single, item, plan, **single_kwargs): i
                 for i, (item, plan) in enumerate(planned)
             }
             results: list[dict[str, str] | None] = [None] * len(planned)
@@ -1125,7 +1188,7 @@ def _run_loop(  # noqa: C901
             rows = [r for r in results if r is not None]
     else:
         for item, plan in planned:
-            rows.append(_apply_single(item, plan, attempted_ref, count_lock, print_lock))
+            rows.append(_apply_single(item, plan, **single_kwargs))
 
     return rows
 
@@ -1185,6 +1248,7 @@ def run_request(
     interactive: bool = False,
     idempotency_check: bool = False,
     credentials: Credentials | None = None,
+    rate_bucket: TokenBucket | None = None,
 ) -> list[dict[str, str]]:
     return _run_loop(
         service,
@@ -1206,9 +1270,15 @@ def run_request(
         idempotency_check=idempotency_check,
         plan_fn=lambda item: plan_request(item, target_email),
         apply_fn=lambda item, plan: apply_request_plan(
-            service, item, target_email=target_email, plan=plan, email_message=email_message
+            service,
+            item,
+            target_email=target_email,
+            plan=plan,
+            email_message=email_message,
+            rate_bucket=rate_bucket,
         ),
         credentials=credentials,
+        rate_bucket=rate_bucket,
     )
 
 
@@ -1233,6 +1303,7 @@ def run_accept(
     interactive: bool = False,
     idempotency_check: bool = False,
     credentials: Credentials | None = None,
+    rate_bucket: TokenBucket | None = None,
 ) -> list[dict[str, str]]:
     return _run_loop(
         service,
@@ -1253,8 +1324,9 @@ def run_accept(
         interactive=interactive,
         idempotency_check=idempotency_check,
         plan_fn=lambda item: plan_accept(item, recipient_email),
-        apply_fn=lambda item, plan: apply_accept_plan(service, item, plan),
+        apply_fn=lambda item, plan: apply_accept_plan(service, item, plan, rate_bucket=rate_bucket),
         credentials=credentials,
+        rate_bucket=rate_bucket,
     )
 
 
@@ -1333,6 +1405,7 @@ def apply_request_plan(
     target_email: str,
     plan: ActionPlan,
     email_message: str | None,
+    rate_bucket: TokenBucket | None = None,
 ) -> None:
     if plan.action == "create-permission":
         create_kwargs: dict[str, Any] = {
@@ -1363,10 +1436,16 @@ def apply_request_plan(
     else:
         raise ValueError(f"Unsupported request action: {plan.action}")
 
-    execute_with_retries(request.execute)
+    execute_with_retries(request, rate_bucket=rate_bucket)
 
 
-def apply_accept_plan(service: Resource, item: DriveItem, plan: ActionPlan) -> None:
+def apply_accept_plan(
+    service: Resource,
+    item: DriveItem,
+    plan: ActionPlan,
+    *,
+    rate_bucket: TokenBucket | None = None,
+) -> None:
     if not plan.permission_id:
         raise ValueError("accept-transfer action requires a permission id")
 
@@ -1378,7 +1457,7 @@ def apply_accept_plan(service: Resource, item: DriveItem, plan: ActionPlan) -> N
         body={"role": "owner"},
         fields="id,emailAddress,role,pendingOwner",
     )
-    execute_with_retries(request.execute)
+    execute_with_retries(request, rate_bucket=rate_bucket)
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1537,7 @@ def run_doctor(
     credentials_file: Path,
     token_file: Path,
     folder_id: str,
+    rate_bucket: TokenBucket | None = None,
 ) -> int:
     """Run diagnostic checks and print a pass/fail report."""
     failures = 0
@@ -1502,7 +1582,8 @@ def run_doctor(
     # Drive API reachability
     try:
         about = execute_with_retries(
-            lambda: service.about().get(fields="user(emailAddress,displayName)").execute()
+            service.about().get(fields="user(emailAddress,displayName)"),
+            rate_bucket=rate_bucket,
         )
         user_email = about.get("user", {}).get("emailAddress", "unknown")
         check("Drive API reachable", True, f"authenticated as {user_email}")
@@ -1511,7 +1592,9 @@ def run_doctor(
 
     # Folder access
     try:
-        folder = get_file(service, folder_id, fields="id,name,mimeType,driveId")
+        folder = get_file(
+            service, folder_id, fields="id,name,mimeType,driveId", rate_bucket=rate_bucket
+        )
         is_folder = folder.get("mimeType") == FOLDER_MIME_TYPE
         check("folder-id is accessible", True, folder.get("name", folder_id))
         check("folder-id is not a shared drive", not folder.get("driveId"), "")

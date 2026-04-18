@@ -83,7 +83,7 @@ class FakeRequest:
     def __init__(self, payload: object) -> None:
         self.payload = payload
 
-    def execute(self) -> object:
+    def execute(self, **_kw: object) -> object:
         return self.payload
 
 
@@ -520,18 +520,19 @@ def test_is_retryable_rejects_invalid_json_payload() -> None:
     assert is_retryable(error) is False
 
 
-def test_execute_with_retries_retries_retryable_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execute_with_retries_retries_403_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts = {"count": 0}
     monkeypatch.setattr("gdrive_ownership_transfer.cli.time.sleep", lambda _: None)
     monkeypatch.setattr("gdrive_ownership_transfer.cli.random.uniform", lambda _a, _b: 0.0)
 
-    def request_fn() -> str:
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            raise make_http_error(429, "busy")
-        return "ok"
+    class _FakeRequest:
+        def execute(self, num_retries: int = 0) -> str:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise make_http_error(403, "quota exceeded", "rateLimitExceeded")
+            return "ok"
 
-    assert execute_with_retries(request_fn) == "ok"
+    assert execute_with_retries(_FakeRequest()) == "ok"  # type: ignore[arg-type]
     assert attempts["count"] == 2
 
 
@@ -541,10 +542,12 @@ def test_execute_with_retries_reraises_non_retryable_errors(
     monkeypatch.setattr("gdrive_ownership_transfer.cli.time.sleep", lambda _: None)
     monkeypatch.setattr("gdrive_ownership_transfer.cli.random.uniform", lambda _a, _b: 0.0)
 
+    class _FakeRequest:
+        def execute(self, num_retries: int = 0) -> None:
+            raise make_http_error(403, "forbidden", "forbidden")
+
     with pytest.raises(HttpError):
-        execute_with_retries(
-            lambda: (_ for _ in ()).throw(make_http_error(403, "forbidden", "forbidden"))
-        )
+        execute_with_retries(_FakeRequest())  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +613,7 @@ def test_walk_tree_recurses_and_preserves_paths(
         parent_id: str,
         *,
         page_size: int,
+        rate_bucket: object = None,
     ) -> list[dict[str, object]]:
         assert page_size == 100
         if parent_id == "root":
@@ -1632,9 +1636,7 @@ def test_run_auth_revoke_deletes_token_file(
 
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _fake_urlopen)
 
-    result = run_auth_revoke(
-        token_file=token_file,
-    )
+    result = run_auth_revoke(token_file=token_file)
     assert result == 0
     assert not token_file.exists()
     assert urlopen_calls
@@ -2261,9 +2263,7 @@ def test_run_auth_revoke_handles_corrupt_token_file(
         lambda *_a, **_k: _FakeResp(),
     )
 
-    result = run_auth_revoke(
-        token_file=token_file,
-    )
+    result = run_auth_revoke(token_file=token_file)
     # Token unreadable → token=None → revoke skipped → file still deleted
     assert result == 0
     assert not token_file.exists()
@@ -2301,9 +2301,7 @@ def test_run_auth_revoke_handles_http_error_from_revoke(
 
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise_http)
 
-    result = run_auth_revoke(
-        token_file=token_file,
-    )
+    result = run_auth_revoke(token_file=token_file)
     assert result == 0
     assert not token_file.exists()
 
@@ -2331,9 +2329,7 @@ def test_run_auth_revoke_handles_network_error(
 
     monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _raise)
 
-    result = run_auth_revoke(
-        token_file=token_file,
-    )
+    result = run_auth_revoke(token_file=token_file)
     assert result == 0  # graceful
     assert not token_file.exists()
 
@@ -2596,18 +2592,19 @@ def test_run_auth_revoke_handles_unlink_error(
         encoding="utf-8",
     )
 
-    class _FakeResp:
-        status = 200
-
-        def __enter__(self) -> _FakeResp:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            pass
+    # run_auth_revoke uses urllib.request.urlopen to revoke, not Credentials.revoke.
+    from types import SimpleNamespace
 
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli.urllib.request.urlopen",
-        lambda *_a, **_k: _FakeResp(),
+        lambda *_a, **_k: SimpleNamespace(status=200).__enter__().__class__,
+    )
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.urllib.request.urlopen",
+        lambda *_a, **_k: SimpleNamespace(
+            __enter__=lambda s: SimpleNamespace(status=200),
+            __exit__=lambda s, *_: False,
+        ),
     )
 
     def _raise_oserror(*_a: object, **_k: object) -> None:
@@ -2617,9 +2614,7 @@ def test_run_auth_revoke_handles_unlink_error(
 
     monkeypatch.setattr(pathlib.Path, "unlink", _raise_oserror)
 
-    result = run_auth_revoke(
-        token_file=token_file,
-    )
+    result = run_auth_revoke(token_file=token_file)
     assert result == 1
 
 
