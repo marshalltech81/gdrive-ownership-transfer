@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -91,6 +91,28 @@ class ActionPlan:
     action: ActionType
     detail: str
     permission_id: str | None = None
+
+
+@dataclass
+class RunContext:
+    """Shared mutable state and locks for concurrent _apply_single workers.
+
+    Bundles the 4 coordinating locks plus the counters and checkpoint set so
+    _apply_single does not need to pass them as individual kwargs. All lock
+    fields guard mutations to their sibling data:
+      - checkpoint_lock guards ``completed_ids`` and the checkpoint file write
+      - count_lock guards ``attempted``
+      - print_lock serializes stdout/stderr writes
+      - token_lock serializes credentials.refresh() across workers
+    """
+
+    completed_ids: set[str]
+    checkpoint_file: Path | None
+    attempted: int = 0
+    checkpoint_lock: threading.Lock = field(default_factory=threading.Lock)
+    count_lock: threading.Lock = field(default_factory=threading.Lock)
+    print_lock: threading.Lock = field(default_factory=threading.Lock)
+    token_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 # ---------------------------------------------------------------------------
@@ -963,44 +985,38 @@ def _apply_single(  # noqa: C901
     plan_fn: Callable[[DriveItem], ActionPlan],
     apply_fn: Callable[[DriveItem, ActionPlan], None],
     credentials: Credentials | None,
-    checkpoint_file: Path | None,
-    completed_ids: set[str],
-    checkpoint_lock: threading.Lock,
-    attempted_ref: list[int],
-    count_lock: threading.Lock,
-    print_lock: threading.Lock,
     rate_bucket: TokenBucket | None,
-    token_lock: threading.Lock,
+    ctx: RunContext,
 ) -> dict[str, str]:
     row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
 
     if plan.action == "skip":
         row["status"] = "skipped"
         if not quiet:
-            with print_lock:
+            with ctx.print_lock:
                 print(f"[skip] {item.path} :: {plan.detail}", file=out)
         return row
 
     # Early bail without reserving a slot — exact cap enforcement happens below.
     # Only gate in apply mode; dry-run should show all planned rows regardless.
-    with count_lock:
-        if apply and max_items is not None and attempted_ref[0] >= max_items:
+    with ctx.count_lock:
+        if apply and max_items is not None and ctx.attempted >= max_items:
             row["status"] = "skipped"
             row["detail"] = f"{plan.detail}; max-items reached"
             if not quiet:
-                with print_lock:
+                with ctx.print_lock:
                     print(f"[skip] {item.path} :: max-items reached", file=out)
             return row
 
     if not apply:
         row["status"] = "dry-run"
-        with print_lock:
+        with ctx.print_lock:
             print(f"[dry-run] {item.path} :: {plan.detail}", file=out)
         return row
 
     # Interactive per-item confirmation
     if interactive:
-        with print_lock:
+        with ctx.print_lock:
             if _RICH_AVAILABLE and _rich_err_console is not None:
                 if not _RichConfirm.ask(
                     f"[bold]{item.path}[/bold] — {plan.action}: {plan.detail} — Apply?",
@@ -1038,7 +1054,7 @@ def _apply_single(  # noqa: C901
                 row["status"] = "skipped"
                 row["detail"] = f"idempotency check: {fresh_plan.detail}"
                 if not quiet:
-                    with print_lock:
+                    with ctx.print_lock:
                         print(f"[skip] {item.path} :: {row['detail']}", file=out)
                 return row
             plan_to_use = fresh_plan
@@ -1053,38 +1069,38 @@ def _apply_single(  # noqa: C901
 
     # Reserve a slot atomically right before the API call so interactive/
     # idempotency skips do not consume a max-items slot.
-    with count_lock:
-        if max_items is not None and attempted_ref[0] >= max_items:
+    with ctx.count_lock:
+        if max_items is not None and ctx.attempted >= max_items:
             row["status"] = "skipped"
             row["detail"] = f"{plan_to_use.detail}; max-items reached"
             if not quiet:
-                with print_lock:
+                with ctx.print_lock:
                     print(f"[skip] {item.path} :: max-items reached", file=out)
             return row
-        attempted_ref[0] += 1
+        ctx.attempted += 1
 
     # Proactive token refresh mid-run
     if credentials is not None:
-        _ensure_token_fresh(credentials, token_lock)
+        _ensure_token_fresh(credentials, ctx.token_lock)
 
     try:
         apply_fn(item, plan_to_use)
         row["status"] = "applied"
-        with print_lock:
+        with ctx.print_lock:
             print(f"[applied] {item.path} :: {plan_to_use.detail}", file=out)
-        if checkpoint_file is not None:
-            with checkpoint_lock:
-                completed_ids.add(item.id)
-                save_checkpoint(checkpoint_file, completed_ids)
+        if ctx.checkpoint_file is not None:
+            with ctx.checkpoint_lock:
+                ctx.completed_ids.add(item.id)
+                save_checkpoint(ctx.checkpoint_file, ctx.completed_ids)
     except HttpError as exc:
         row["status"] = "error"
         row["detail"] = format_http_error(exc)
-        with print_lock:
+        with ctx.print_lock:
             print(f"[error] {item.path} :: {row['detail']}", file=out)
     except Exception as exc:
         row["status"] = "error"
         row["detail"] = str(exc) or exc.__class__.__name__
-        with print_lock:
+        with ctx.print_lock:
             print(f"[error] {item.path} :: {row['detail']}", file=out)
     return row
 
@@ -1175,11 +1191,7 @@ def _run_loop(
             rows.append(row)
         return rows
 
-    checkpoint_lock = threading.Lock()
-    attempted_ref = [0]
-    count_lock = threading.Lock()
-    print_lock = threading.Lock()
-    token_lock = threading.Lock()
+    ctx = RunContext(completed_ids=completed_ids, checkpoint_file=checkpoint_file)
     rows = []
 
     single_kwargs: dict[str, Any] = dict(
@@ -1193,14 +1205,8 @@ def _run_loop(
         plan_fn=plan_fn,
         apply_fn=apply_fn,
         credentials=credentials,
-        checkpoint_file=checkpoint_file,
-        completed_ids=completed_ids,
-        checkpoint_lock=checkpoint_lock,
-        attempted_ref=attempted_ref,
-        count_lock=count_lock,
-        print_lock=print_lock,
         rate_bucket=rate_bucket,
-        token_lock=token_lock,
+        ctx=ctx,
     )
 
     if concurrency > 1 and apply:
