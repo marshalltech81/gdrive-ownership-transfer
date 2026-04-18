@@ -1682,6 +1682,30 @@ def test_notify_webhook_handles_failure_gracefully(monkeypatch: pytest.MonkeyPat
     _notify_webhook("https://hook.example.com/test", [], command="scan")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "ftp://example.com/payload",
+        "data:text/plain,hello",
+        "not-a-url",
+    ],
+)
+def test_notify_webhook_rejects_non_http_schemes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str
+) -> None:
+    called: list[bool] = []
+
+    def _spy(*_: object, **__: object) -> None:
+        called.append(True)
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.urllib.request.urlopen", _spy)
+    _notify_webhook(url, [], command="scan")
+
+    assert called == [], "urlopen must not be invoked for non-HTTP(S) schemes"
+    assert "unsupported URL scheme" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # _check_credential_permissions
 # ---------------------------------------------------------------------------

@@ -1700,6 +1700,17 @@ def run_auth_revoke(*, token_file: Path) -> int:
 
 
 def _notify_webhook(url: str, rows: list[dict[str, str]], *, command: str) -> None:
+    # Reject non-HTTP(S) schemes so a stray file://, ftp://, or data:// URL
+    # cannot coerce urlopen into reading local files or unexpected protocols.
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        print(
+            f"Warning: webhook notification failed: unsupported URL scheme {scheme!r} "
+            "(expected http or https).",
+            file=sys.stderr,
+        )
+        return
+
     counts = Counter(row["status"] for row in rows)
     payload = json.dumps(
         {
