@@ -4,7 +4,7 @@ This repo contains a small CLI for bulk ownership-transfer workflows inside a Go
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for how to report vulnerabilities privately.
+Use GitHub private vulnerability reporting (Security tab) to report issues privately. The shared policy lives in the account-level [`.github`](https://github.com/marshalltech81/.github) repository.
 
 It is designed for the personal-account case where Google does **not** provide an admin bulk-transfer feature. The script helps with the work Google does allow through the Drive API:
 
@@ -217,7 +217,7 @@ Common local commands:
 uv sync --dev
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy src
+uv run pyright src
 uv run pytest
 uv run bandit -q -r src
 uv build
@@ -281,7 +281,6 @@ The repository includes:
 - `tests/`: unit tests
 - `noxfile.py`: nox session matrix
 - `AGENTS.md`: repository guidance for contributors and coding agents
-- `CONTRIBUTING.md`: contributor workflow and commit conventions
 
 ## License
 

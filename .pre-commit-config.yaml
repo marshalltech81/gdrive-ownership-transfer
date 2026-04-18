@@ -45,10 +45,10 @@ repos:
         entry: uv run ruff format --check .
         language: system
         pass_filenames: false
-      - id: mypy
-        name: mypy src
+      - id: pyright
+        name: pyright src
         always_run: true
-        entry: uv run mypy src
+        entry: uv run pyright src
         language: system
         pass_filenames: false
       - id: pytest

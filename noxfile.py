@@ -18,7 +18,7 @@ def format(session: nox.Session) -> None:
 
 @nox.session(python=PYTHON_VERSIONS[0])
 def typecheck(session: nox.Session) -> None:
-    session.run("uv", "run", "mypy", "src", external=True)
+    session.run("uv", "run", "pyright", "src", external=True)
 
 
 @nox.session(python=PYTHON_VERSIONS)

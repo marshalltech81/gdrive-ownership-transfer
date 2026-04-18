@@ -14,7 +14,7 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
-.mypy_cache/
+.pyright/
 .pytest_cache/
 .ruff_cache/
 .uv-cache/

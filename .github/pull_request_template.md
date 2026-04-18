@@ -7,7 +7,7 @@
 
 - [ ] `uv run ruff check .`
 - [ ] `uv run ruff format --check .`
-- [ ] `uv run mypy src`
+- [ ] `uv run pyright src`
 - [ ] `uv run pytest`
 - [ ] `uv build`
 

@@ -46,7 +46,7 @@ try:
     _rich_err_console = _RichConsole(stderr=True)
 except ImportError:
     _RICH_AVAILABLE = False
-    _rich_err_console = None  # type: ignore[assignment]
+    _rich_err_console = None
 
 # ---------------------------------------------------------------------------
 # Constants and module-level state
@@ -466,7 +466,7 @@ def main() -> int:  # noqa: C901
     service = build_drive_service(credentials)
 
     me = execute_with_retries(
-        service.about().get(fields="user(emailAddress,displayName)"),
+        service.about().get(fields="user(emailAddress,displayName)"),  # pyright: ignore[reportAttributeAccessIssue]
         rate_bucket=rate_bucket,
     )["user"]
     root = get_file(
@@ -605,11 +605,13 @@ def load_credentials(credentials_file: Path, token_file: Path) -> Credentials:
                 file=sys.stderr,
             )
             flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
-            credentials = flow.run_local_server(port=0)
+            credentials = cast(Credentials, flow.run_local_server(port=0))
     else:
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
-        credentials = flow.run_local_server(port=0)
+        credentials = cast(Credentials, flow.run_local_server(port=0))
 
+    if credentials is None:
+        raise RuntimeError("Failed to obtain OAuth credentials")
     token_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(token_file.parent, 0o700)
@@ -749,7 +751,7 @@ def get_file(
     return cast(
         dict[str, Any],
         execute_with_retries(
-            service.files().get(fileId=file_id, supportsAllDrives=True, fields=fields),
+            service.files().get(fileId=file_id, supportsAllDrives=True, fields=fields),  # pyright: ignore[reportAttributeAccessIssue]
             rate_bucket=rate_bucket,
         ),
     )
@@ -884,7 +886,7 @@ def list_children(
     )
 
     while True:
-        request = service.files().list(
+        request = service.files().list(  # pyright: ignore[reportAttributeAccessIssue]
             q=f"'{parent_id}' in parents and trashed = false",
             fields=fields,
             includeItemsFromAllDrives=True,
@@ -913,10 +915,10 @@ def _collect_items_with_progress(
     items: list[DriveItem] = []
 
     if _RICH_AVAILABLE and output_format == "text" and sys.stderr.isatty():
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            MofNCompleteColumn(),
+        with Progress(  # pyright: ignore[reportPossiblyUnboundVariable]
+            SpinnerColumn(),  # pyright: ignore[reportPossiblyUnboundVariable]
+            TextColumn("[progress.description]{task.description}"),  # pyright: ignore[reportPossiblyUnboundVariable]
+            MofNCompleteColumn(),  # pyright: ignore[reportPossiblyUnboundVariable]
             console=_rich_err_console,
             transient=True,
         ) as progress:
@@ -1039,7 +1041,7 @@ def _apply_single(  # noqa: C901
     if interactive:
         with ctx.print_lock:
             if _RICH_AVAILABLE and _rich_err_console is not None:
-                if not _RichConfirm.ask(
+                if not _RichConfirm.ask(  # pyright: ignore[reportPossiblyUnboundVariable]
                     f"[bold]{item.path}[/bold] — {plan.action}: {plan.detail} — Apply?",
                     console=_rich_err_console,
                     default=False,
@@ -1514,11 +1516,11 @@ def apply_request_plan(
         }
         if email_message:
             create_kwargs["emailMessage"] = email_message
-        request = service.permissions().create(**create_kwargs)
+        request = service.permissions().create(**create_kwargs)  # pyright: ignore[reportAttributeAccessIssue]
     elif plan.action == "update-permission":
         if not plan.permission_id:
             raise ValueError("update-permission action requires a permission id")
-        request = service.permissions().update(
+        request = service.permissions().update(  # pyright: ignore[reportAttributeAccessIssue]
             fileId=item.id,
             permissionId=plan.permission_id,
             supportsAllDrives=True,
@@ -1541,7 +1543,7 @@ def apply_accept_plan(
     if not plan.permission_id:
         raise ValueError("accept-transfer action requires a permission id")
 
-    request = service.permissions().update(
+    request = service.permissions().update(  # pyright: ignore[reportAttributeAccessIssue]
         fileId=item.id,
         permissionId=plan.permission_id,
         supportsAllDrives=True,
@@ -1674,7 +1676,7 @@ def run_doctor(
     # Drive API reachability
     try:
         about = execute_with_retries(
-            service.about().get(fields="user(emailAddress,displayName)"),
+            service.about().get(fields="user(emailAddress,displayName)"),  # pyright: ignore[reportAttributeAccessIssue]
             rate_bucket=rate_bucket,
         )
         user_email = about.get("user", {}).get("emailAddress", "unknown")

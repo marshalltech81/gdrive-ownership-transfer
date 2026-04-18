@@ -46,8 +46,9 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - `.github/workflows/ci.yml`: lint, type-check, tests, build, and Conventional Commit validation
 - `.github/workflows/security.yml`: Bandit and dependency audit checks
 - `.github/dependabot.yml`: automated dependency and GitHub Actions update policy
-- `SECURITY.md`: coordinated disclosure guidance
-- `CONTRIBUTING.md`: contributor workflow and recommended local checks
+
+`CONTRIBUTING.md`, `SECURITY.md`, and other community-health files are inherited
+from the account-level [`.github`](https://github.com/marshalltech81/.github) repository.
 
 ## CLI Subcommands
 
@@ -89,13 +90,6 @@ These should not change casually:
 - Conflict detection in `plan_request` must surface other pending-owner conflicts rather than silently overwriting them.
 - Idempotency checks must re-fetch the item from the API before applying to prevent duplicate mutations.
 
-## Toolchain Divergences from Org Defaults
-
-The org-wide `AGENTS.md` lists `pyright` as the default static type checker for Python projects.
-This repository uses `mypy` instead. The choice predates the org default and is intentional: mypy
-is already configured in `pyproject.toml`, integrated into `pre-commit`, and run in CI.
-Do not migrate to `pyright` unless the task explicitly includes toolchain modernization.
-
 ## Workflow Expectations
 
 Use these commands unless the task specifically requires something else:
@@ -105,7 +99,7 @@ uv sync --dev
 uv run pre-commit run --all-files
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy src
+uv run pyright src
 uv run pytest
 uv run bandit -q -r src
 uv build
@@ -165,7 +159,7 @@ Changes are expected to keep these checks green:
 - `pre-commit run --all-files`
 - `ruff check .`
 - `ruff format --check .`
-- `mypy src`
+- `pyright src`
 - `pytest` with coverage floor `>= 90%`
 - `bandit -q -r src`
 - `uv build`
@@ -177,7 +171,7 @@ Changes are expected to keep these checks green:
 - Keep GitHub Actions workflow permissions minimal and explicit.
 - Keep Dependabot enabled for both Python dependencies and GitHub Actions.
 - Prefer pinned major versions for GitHub Actions and keep them updated through Dependabot.
-- Preserve `SECURITY.md` and private vulnerability reporting support.
+- Preserve private vulnerability reporting support (shared `SECURITY.md` is inherited from the account-level `.github` repository).
 - If GitHub-side security settings are changed, keep the repository files aligned with those settings.
 
 ## Editing Guidance
