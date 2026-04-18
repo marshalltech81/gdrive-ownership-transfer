@@ -1290,6 +1290,35 @@ def test_load_checkpoint_handles_corrupt_file(tmp_path: Path) -> None:
     assert load_checkpoint(p) == set()
 
 
+def test_load_checkpoint_rejects_non_object_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cp.json"
+    p.write_text('["id-1", "id-2"]', encoding="utf-8")
+    assert load_checkpoint(p) == set()
+    assert "not a JSON object" in capsys.readouterr().err
+
+
+def test_load_checkpoint_rejects_string_completed_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A string is iterable into characters, which would silently produce a
+    bogus set of 1-char IDs. Validation must reject it."""
+    p = tmp_path / "cp.json"
+    p.write_text('{"completed_ids": "abc123"}', encoding="utf-8")
+    assert load_checkpoint(p) == set()
+    assert "invalid completed_ids" in capsys.readouterr().err
+
+
+def test_load_checkpoint_rejects_non_string_entries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cp.json"
+    p.write_text('{"completed_ids": ["ok", 42, null]}', encoding="utf-8")
+    assert load_checkpoint(p) == set()
+    assert "invalid completed_ids" in capsys.readouterr().err
+
+
 def test_save_checkpoint_writes_sorted_ids(tmp_path: Path) -> None:
     p = tmp_path / "cp.json"
     save_checkpoint(p, {"z-id", "a-id"})

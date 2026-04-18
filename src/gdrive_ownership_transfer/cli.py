@@ -201,7 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
     request_parser.add_argument(
         "--confirm",
         action="store_true",
-        help="Prompt for confirmation before applying mutations (requires --apply).",
+        help="Prompt for confirmation before applying mutations when --apply is set; "
+        "ignored during dry runs.",
     )
     _add_mutation_args(request_parser)
 
@@ -218,7 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     accept_parser.add_argument(
         "--confirm",
         action="store_true",
-        help="Prompt for confirmation before applying mutations (requires --apply).",
+        help="Prompt for confirmation before applying mutations when --apply is set; "
+        "ignored during dry runs.",
     )
     _add_mutation_args(accept_parser)
 
@@ -788,10 +790,29 @@ def load_checkpoint(path: Path) -> set[str]:
         return set()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return set(data.get("completed_ids", []))
     except Exception:
         print(f"Warning: could not read checkpoint file {path} — starting fresh.", file=sys.stderr)
         return set()
+
+    # Validate shape: a partially-corrupt file may still parse as JSON but
+    # deliver a wrong-typed completed_ids (e.g. a string, which would silently
+    # iterate into a set of single characters and cause bogus skips).
+    if not isinstance(data, dict):
+        print(
+            f"Warning: checkpoint file {path} is not a JSON object — starting fresh.",
+            file=sys.stderr,
+        )
+        return set()
+    completed_ids = data.get("completed_ids", [])
+    if not isinstance(completed_ids, list) or not all(
+        isinstance(entry, str) for entry in completed_ids
+    ):
+        print(
+            f"Warning: checkpoint file {path} has an invalid completed_ids field — starting fresh.",
+            file=sys.stderr,
+        )
+        return set()
+    return set(completed_ids)
 
 
 def save_checkpoint(path: Path, completed_ids: set[str]) -> None:
