@@ -114,21 +114,23 @@ class TokenBucket:
         self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        wait = 0.0
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_check
-            self._last_check = now
-            self._tokens = min(
-                self._capacity, self._tokens + elapsed * self._rate / self._per_seconds
-            )
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-            else:
+        # Loop so concurrent callers cannot all "pay" the same wait and then
+        # proceed together — after sleeping we re-enter the lock, recalculate
+        # tokens, and only return once we atomically consume one.
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_check
+                self._last_check = now
+                self._tokens = min(
+                    self._capacity,
+                    self._tokens + elapsed * self._rate / self._per_seconds,
+                )
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
                 deficit = 1.0 - self._tokens
                 wait = deficit * self._per_seconds / self._rate
-                self._tokens = 0.0
-        if wait > 0.0:
             time.sleep(wait)
 
 
@@ -475,7 +477,9 @@ def main() -> int:  # noqa: C901
     )
 
     if args.command == "scan":
-        rows = run_scan(service, root, owned_only=args.owned_only, **common)
+        rows = run_scan(
+            service, root, owned_only=args.owned_only, rate_bucket=rate_bucket, **common
+        )
     elif args.command == "request":
         target_email = args.target_email or infer_target_email(root, me.get("emailAddress"))
         print(f"Target owner: {target_email}", file=_meta_out)
@@ -623,14 +627,35 @@ def _warn_if_expiring_soon(credentials: Credentials) -> None:
         print(msg, file=sys.stderr)
 
 
-def _ensure_token_fresh(credentials: Credentials) -> None:
-    """Proactively refresh the token mid-run if it will expire soon."""
-    expiry = getattr(credentials, "expiry", None)
-    if expiry is None:
+def _ensure_token_fresh(credentials: Credentials, lock: threading.Lock | None = None) -> None:
+    """Proactively refresh the token mid-run if it will expire soon.
+
+    When called from a worker pool, pass ``lock`` so concurrent threads do not
+    race inside ``google.oauth2.credentials.Credentials`` (not thread-safe).
+    """
+
+    def _needs_refresh() -> bool:
+        expiry = getattr(credentials, "expiry", None)
+        if expiry is None:
+            return False
+        expiry_aware = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=UTC)
+        remaining = expiry_aware - datetime.now(UTC)
+        return remaining.total_seconds() < _EXPIRY_WARN_SECONDS and bool(credentials.refresh_token)
+
+    if not _needs_refresh():
         return
-    expiry_aware = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=UTC)
-    remaining = expiry_aware - datetime.now(UTC)
-    if remaining.total_seconds() < _EXPIRY_WARN_SECONDS and credentials.refresh_token:
+
+    if lock is None:
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            print(f"Warning: mid-run token refresh failed: {exc}", file=sys.stderr)
+        return
+
+    with lock:
+        # Re-check inside the lock so only the first waiter actually refreshes.
+        if not _needs_refresh():
+            return
         try:
             credentials.refresh(Request())
         except Exception as exc:
@@ -882,10 +907,11 @@ def run_scan(
     path_prefix: str | None,
     exclude_mime_types: list[str] | None = None,
     exclude_path_prefix: str | None = None,
+    rate_bucket: TokenBucket | None = None,
 ) -> list[dict[str, str]]:
     _out = sys.stderr if output_format == "json" else sys.stdout
     all_items = _collect_items_with_progress(
-        service, root, page_size=page_size, output_format=output_format
+        service, root, page_size=page_size, output_format=output_format, rate_bucket=rate_bucket
     )
     items = _apply_filters(
         all_items,
@@ -940,6 +966,7 @@ def _apply_single(  # noqa: C901
     count_lock: threading.Lock,
     print_lock: threading.Lock,
     rate_bucket: TokenBucket | None,
+    token_lock: threading.Lock,
 ) -> dict[str, str]:
     row = make_row(item, action=plan.action, status="planned", detail=plan.detail)
 
@@ -1034,7 +1061,7 @@ def _apply_single(  # noqa: C901
 
     # Proactive token refresh mid-run
     if credentials is not None:
-        _ensure_token_fresh(credentials)
+        _ensure_token_fresh(credentials, token_lock)
 
     try:
         apply_fn(item, plan_to_use)
@@ -1148,6 +1175,7 @@ def _run_loop(
     attempted_ref = [0]
     count_lock = threading.Lock()
     print_lock = threading.Lock()
+    token_lock = threading.Lock()
     rows = []
 
     single_kwargs: dict[str, Any] = dict(
@@ -1168,6 +1196,7 @@ def _run_loop(
         count_lock=count_lock,
         print_lock=print_lock,
         rate_bucket=rate_bucket,
+        token_lock=token_lock,
     )
 
     if concurrency > 1 and apply:

@@ -1765,6 +1765,52 @@ def test_ensure_token_fresh_ignores_missing_expiry() -> None:
     _ensure_token_fresh(creds)  # type: ignore[arg-type] — should not raise
 
 
+def test_ensure_token_fresh_with_lock_refreshes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    refreshed: list[bool] = []
+
+    def _refresh(_req: object) -> None:
+        refreshed.append(True)
+        # Push expiry far into the future to mimic a successful refresh so the
+        # second waiter's re-check inside the lock returns False.
+        creds.expiry = datetime.now(UTC) + timedelta(seconds=3600)
+
+    creds = SimpleNamespace(
+        expiry=datetime.now(UTC) + timedelta(seconds=10),
+        refresh_token="rt",
+        refresh=_refresh,
+    )
+    lock = threading.Lock()
+    _ensure_token_fresh(creds, lock)  # type: ignore[arg-type]
+    # Second call finds the token no longer near-expiry and skips refresh.
+    _ensure_token_fresh(creds, lock)  # type: ignore[arg-type]
+    assert len(refreshed) == 1
+
+
+def test_ensure_token_fresh_with_lock_handles_refresh_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import threading
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    def _raise(_req: object) -> None:
+        raise RuntimeError("boom")
+
+    creds = SimpleNamespace(
+        expiry=datetime.now(UTC) + timedelta(seconds=10),
+        refresh_token="rt",
+        refresh=_raise,
+    )
+    _ensure_token_fresh(creds, threading.Lock())  # type: ignore[arg-type]
+    assert "mid-run token refresh failed" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # run_doctor
 # ---------------------------------------------------------------------------
@@ -2317,7 +2363,7 @@ def test_run_auth_revoke_handles_network_error(
                 "refresh_token": "rtok",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "client_id": "cid",
-                "client_secret": "csecret",
+                "client_secret": "csecret",  # pragma: allowlist secret
                 "scopes": ["https://www.googleapis.com/auth/drive"],
             }
         ),
@@ -2637,7 +2683,7 @@ def test_run_request_with_credentials_triggers_token_check(
     refresh_calls: list[object] = []
     monkeypatch.setattr(
         "gdrive_ownership_transfer.cli._ensure_token_fresh",
-        lambda creds: refresh_calls.append(creds),
+        lambda creds, _lock=None: refresh_calls.append(creds),
     )
 
     fake_creds = MagicMock()
