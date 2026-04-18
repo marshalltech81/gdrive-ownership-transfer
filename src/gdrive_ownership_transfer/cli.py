@@ -1004,7 +1004,7 @@ def _apply_single(  # noqa: C901
     interactive: bool,
     service: Resource,
     plan_fn: Callable[[DriveItem], ActionPlan],
-    apply_fn: Callable[[DriveItem, ActionPlan], None],
+    apply_fn: Callable[[Resource, DriveItem, ActionPlan], None],
     credentials: Credentials | None,
     rate_bucket: TokenBucket | None,
     ctx: RunContext,
@@ -1116,7 +1116,7 @@ def _apply_single(  # noqa: C901
         _ensure_token_fresh(credentials, ctx.token_lock)
 
     try:
-        apply_fn(item, plan_to_use)
+        apply_fn(service, item, plan_to_use)
         row["status"] = "applied"
         with ctx.print_lock:
             print(f"[applied] {item.path} :: {plan_to_use.detail}", file=out)
@@ -1162,7 +1162,7 @@ def _run_loop(
     interactive: bool,
     idempotency_check: bool,
     plan_fn: Callable[[DriveItem], ActionPlan],
-    apply_fn: Callable[[DriveItem, ActionPlan], None],
+    apply_fn: Callable[[Resource, DriveItem, ActionPlan], None],
     credentials: Credentials | None = None,
     rate_bucket: TokenBucket | None = None,
 ) -> list[dict[str, str]]:
@@ -1242,10 +1242,29 @@ def _run_loop(
     )
 
     if concurrency > 1 and apply:
+        # google-api-python-client Resource wraps an httplib2.Http that is not
+        # thread-safe, so each worker thread needs its own Resource. Cache it
+        # on a threading.local so the discovery document is built once per
+        # worker, not once per item. If credentials are unavailable we fall
+        # back to the shared service (best effort — this path is not expected
+        # in normal CLI usage since apply mode always has credentials).
+        thread_local = threading.local()
+
+        def _thread_service() -> Resource:
+            svc = getattr(thread_local, "service", None)
+            if svc is None:
+                svc = build_drive_service(credentials) if credentials is not None else service
+                thread_local.service = svc
+            return cast(Resource, svc)
+
+        def _submit(item: DriveItem, plan: ActionPlan) -> dict[str, str]:
+            kwargs = dict(single_kwargs)
+            kwargs["service"] = _thread_service()
+            return _apply_single(item, plan, **kwargs)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_idx = {
-                executor.submit(_apply_single, item, plan, **single_kwargs): i
-                for i, (item, plan) in enumerate(planned)
+                executor.submit(_submit, item, plan): i for i, (item, plan) in enumerate(planned)
             }
             results: list[dict[str, str] | None] = [None] * len(planned)
             for future in concurrent.futures.as_completed(future_to_idx):
@@ -1340,8 +1359,8 @@ def run_request(
         interactive=interactive,
         idempotency_check=idempotency_check,
         plan_fn=lambda item: plan_request(item, target_email),
-        apply_fn=lambda item, plan: apply_request_plan(
-            service,
+        apply_fn=lambda svc, item, plan: apply_request_plan(
+            svc,
             item,
             target_email=target_email,
             plan=plan,
@@ -1395,7 +1414,9 @@ def run_accept(
         interactive=interactive,
         idempotency_check=idempotency_check,
         plan_fn=lambda item: plan_accept(item, recipient_email),
-        apply_fn=lambda item, plan: apply_accept_plan(service, item, plan, rate_bucket=rate_bucket),
+        apply_fn=lambda svc, item, plan: apply_accept_plan(
+            svc, item, plan, rate_bucket=rate_bucket
+        ),
         credentials=credentials,
         rate_bucket=rate_bucket,
     )

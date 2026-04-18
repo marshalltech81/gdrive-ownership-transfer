@@ -2058,6 +2058,78 @@ def test_run_request_concurrency_applies_all_items(monkeypatch: pytest.MonkeyPat
     assert len(calls) == 3
 
 
+def test_run_request_concurrency_builds_per_thread_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When credentials are provided, each worker thread must get its own
+    Resource because googleapiclient/httplib2 is not thread-safe. Verify by
+    monkeypatching build_drive_service and confirming it is called per thread
+    and that apply_request_plan receives the per-thread service (not the
+    shared one passed into run_request)."""
+    from unittest.mock import MagicMock
+
+    items = [
+        DriveItem(
+            id=f"id-{i}",
+            name=f"f{i}",
+            mime_type="text/plain",
+            path=f"Shared/f{i}",
+            owned_by_me=True,
+            drive_id=None,
+            permissions=(),
+        )
+        for i in range(4)
+    ]
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.walk_tree", lambda *_a, **_k: items)
+
+    shared_service = object()
+    built_services: list[object] = []
+
+    def _fake_build(_creds: object) -> object:
+        svc = object()
+        built_services.append(svc)
+        return svc
+
+    monkeypatch.setattr("gdrive_ownership_transfer.cli.build_drive_service", _fake_build)
+
+    # MagicMock credentials would trip the token-freshness check's arithmetic;
+    # stub the refresh helper since this test is only about per-thread service
+    # construction.
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli._ensure_token_fresh",
+        lambda _creds, _lock=None: None,
+    )
+
+    applied_services: list[object] = []
+    monkeypatch.setattr(
+        "gdrive_ownership_transfer.cli.apply_request_plan",
+        lambda svc, *_a, **_k: applied_services.append(svc),
+    )
+
+    rows = run_request(
+        shared_service,
+        {},
+        target_email="owner@example.com",
+        apply=True,
+        max_items=None,
+        email_message=None,
+        confirm=False,
+        concurrency=2,
+        credentials=MagicMock(),
+        **_COMMON,
+    )
+
+    assert len(rows) == 4
+    assert all(r["status"] == "applied" for r in rows)
+    # At least one per-thread service was built (one or two depending on how the
+    # pool distributed work; never zero, never more than the pool size).
+    assert 1 <= len(built_services) <= 2
+    # Every apply_request_plan call used a per-thread service, never the shared one.
+    assert applied_services, "apply_request_plan was never invoked"
+    assert all(svc is not shared_service for svc in applied_services)
+    assert all(svc in built_services for svc in applied_services)
+
+
 # ---------------------------------------------------------------------------
 # _run_loop — interactive mode
 # ---------------------------------------------------------------------------
