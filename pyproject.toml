@@ -17,13 +17,13 @@ dependencies = [
 dev = [
   "bandit[toml]>=1.9.4",
   "nox>=2024.10.9",
-  "pyright>=1.1.400",
+  "pyright>=1.1.409",
   "pip-audit>=2.9.0",
-  "pre-commit>=4.2.0",
+  "pre-commit>=4.6.0",
   "pytest>=8.3.5",
   "pytest-cov>=6.1.1",
   "rich>=13.0.0",
-  "ruff>=0.11.9",
+  "ruff>=0.15.12",
 ]
 
 [project.scripts]
