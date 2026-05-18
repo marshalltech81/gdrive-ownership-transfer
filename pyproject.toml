@@ -9,8 +9,8 @@ authors = [
   { name = "MarshallTech81" },
 ]
 dependencies = [
-  "google-api-python-client>=2.170.0",
-  "google-auth-oauthlib>=1.2.1",
+  "google-api-python-client>=2.196.0",
+  "google-auth-oauthlib>=1.4.0",
 ]
 
 [dependency-groups]
@@ -23,7 +23,7 @@ dev = [
   "pytest>=8.3.5",
   "pytest-cov>=6.1.1",
   "rich>=13.0.0",
-  "ruff>=0.15.12",
+  "ruff>=0.15.13",
 ]
 
 [project.scripts]
