@@ -9,21 +9,21 @@ authors = [
   { name = "MarshallTech81" },
 ]
 dependencies = [
-  "google-api-python-client>=2.170.0",
-  "google-auth-oauthlib>=1.2.1",
+  "google-api-python-client>=2.198.0",
+  "google-auth-oauthlib>=1.4.0",
 ]
 
 [dependency-groups]
 dev = [
   "bandit[toml]>=1.9.4",
-  "nox>=2024.10.9",
-  "pyright>=1.1.409",
-  "pip-audit>=2.9.0",
+  "nox>=2026.7.11",
+  "pyright>=1.1.411",
+  "pip-audit>=2.10.1",
   "pre-commit>=4.6.0",
-  "pytest>=8.3.5",
+  "pytest>=9.1.1",
   "pytest-cov>=6.1.1",
   "rich>=13.0.0",
-  "ruff>=0.15.12",
+  "ruff>=0.15.21",
 ]
 
 [project.scripts]
@@ -31,7 +31,7 @@ gdrive-ownership-transfer = "gdrive_ownership_transfer.cli:main"
 
 
 [build-system]
-requires = ["hatchling>=1.29.0"]
+requires = ["hatchling>=1.31.0"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
