@@ -22,6 +22,9 @@
 #   --query     print one word (completed | running | stale | pending | skipped | draft) and write nothing.
 #   --proceed   like the default, but a pull request whose head Codex has not reviewed gets `success` with a
 #               title that says so. Used by automerge.yml after its grace period (dependency-update policy).
+#               If EXPECT_HEAD_SHA is set and the pull request's head is a different commit, nothing is
+#               written: the grace period was granted to the commit that was eligible then, not to a later
+#               one that someone pushed while it ran.
 #   --dry-run   evaluate and print the check run payload without writing it.
 #
 # Needs GITHUB_TOKEN with `checks: write` (plus read on pull requests and issues) and GITHUB_REPOSITORY.
@@ -71,6 +74,11 @@ author="$(jq -r '.user.login' <<<"$pr_json")"
 draft="$(jq -r '.draft' <<<"$pr_json")"
 has_skip_label="$(jq -r --arg l "$skip_label" '[.labels[].name] | index($l) != null' <<<"$pr_json")"
 
+if [[ "$mode" == "--proceed" && -n "${EXPECT_HEAD_SHA:-}" && "$EXPECT_HEAD_SHA" != "$head_sha" ]]; then
+  echo "PR #${pr}: the head is ${head_sha:0:7}, not ${EXPECT_HEAD_SHA:0:7}, which the grace period was granted to; not applying the policy."
+  exit 0
+fi
+
 # --- Codex's summary comment -----------------------------------------------------------------------
 # One issue comment per pull request, edited in place as the review progresses. The marker is JSON.
 # The fetch is separate from the parse so that an API failure stops the script (and so cannot read as
@@ -106,12 +114,12 @@ elif [[ "$review_status" == "completed" && "$reviewed_sha" == "$head_sha" ]]; th
   if [[ "$sec_status" != "completed" || "$sec_sha" != "$head_sha" ]]; then
     state=running; waiting_on_security=true
   fi
-elif [[ "$review_status" == "completed" ]]; then
-  state=stale # reviewed an earlier commit; the review of the head has not started yet
-elif [[ -n "$marker" ]]; then
-  state=running
+elif [[ "$review_status" == "completed" || ( -n "$reviewed_sha" && "$reviewed_sha" != "$head_sha" ) ]]; then
+  state=stale # a review of an earlier commit, finished or not; the review of the head has not started yet
+elif [[ -n "$marker" && -n "$reviewed_sha" ]]; then
+  state=running # an unfinished code review of the head itself
 else
-  state=pending
+  state=pending # no summary, or one with no code review started (for example only the security review)
 fi
 
 if [[ "$mode" == "--query" ]]; then echo "$state"; exit 0; fi
@@ -147,7 +155,7 @@ case "$state" in
     elif [[ "$state" == "stale" ]]; then
       status=in_progress; conclusion=""
       title="Codex review of $(short "$head_sha") pending"
-      summary="Codex reviewed $(short "$reviewed_sha"); the head is now $(short "$head_sha"). Codex reviews every push, so this check completes when that review lands. If it does not, comment \`@codex review\`. ${rerun}"
+      summary="Codex's latest review was of $(short "$reviewed_sha"); the head is now $(short "$head_sha"). Codex reviews every push, so this check completes when that review lands. If it does not, comment \`@codex review\`. ${rerun}"
     else
       status=in_progress; conclusion=""
       title="Waiting for Codex review"

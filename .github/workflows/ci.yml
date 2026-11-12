@@ -26,6 +26,9 @@ jobs:
       - name: Run actionlint
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
 
+      - name: Test the Codex gate script
+        run: bash scripts/tests/codex_gate_test.sh
+
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
