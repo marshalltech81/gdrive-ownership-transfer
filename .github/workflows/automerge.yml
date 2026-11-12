@@ -4,10 +4,12 @@
 # and codex-review have passed on the head commit and every review thread is resolved; nothing here bypasses
 # branch protection. No approval step is needed because `main` requires zero approving reviews.
 #
-# Eligible: any open, non-draft pull request from a branch of this repository without the `no-automerge`
-# label, by a person or by Dependabot. Dependabot pull requests are limited to patch and minor updates whose
-# head commit Dependabot authored; a major, or a commit pushed on top by anyone else, is left for a human.
-# Other bots are never auto-merged. scripts/automerge.sh decides this from trusted data.
+# Eligible: an open, non-draft Dependabot pull request from a branch of this repository without the
+# `no-automerge` label, limited to patch and minor updates whose head commit Dependabot authored; a major, or a
+# commit pushed on top by anyone else, is left for a human. A person's pull request is never touched: AGENTS.md
+# says to merge those only on the owner's go-ahead, so the owner may still turn auto-merge on by hand. The one
+# exception is the `no-automerge` label, which turns an auto-merge already on off. Other bots are never
+# auto-merged. scripts/automerge.sh decides this from trusted data.
 #
 # It runs from the default branch via `workflow_run`, when `CI` starts on a pull request push, so the
 # pull request's own code is never executed with a write-capable token (`pull_request` would do that).

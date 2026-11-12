@@ -46,7 +46,7 @@ Favor predictable behavior, clear reporting, and conservative guardrails over cl
 - `.github/workflows/ci.yml`: lint, type-check, tests, build, and Conventional Commit validation
 - `.github/workflows/security.yml`: Bandit and dependency audit checks
 - `.github/workflows/codex-gate.yml`: writes the required check `codex-review` from Codex's review comment (`scripts/codex-gate.sh`)
-- `.github/workflows/automerge.yml`: turns on squash auto-merge for eligible pull requests (`scripts/automerge.sh`); GitHub merges once the required checks pass and threads are resolved. Label `no-automerge` holds a pull request
+- `.github/workflows/automerge.yml`: turns on squash auto-merge for eligible Dependabot pull requests (`scripts/automerge.sh`); GitHub merges once the required checks pass and threads are resolved. Label `no-automerge` holds a pull request
 - `.github/workflows/conflicts.yml`: labels pull requests that conflict with `main` as `has-conflicts` (`scripts/flag-conflicts.sh`)
 - `.github/dependabot.yml`: automated dependency and GitHub Actions update policy
 
@@ -175,6 +175,7 @@ Changes are expected to keep these checks green:
 - The codex-gate, automerge and conflicts workflows run from the default branch through `workflow_run`, so a pull request's own code never runs with their write token. Do not switch them to `pull_request`. The one `pull_request_target` use is the `relabel` job in `automerge.yml`, which must keep checking out only the default branch and running nothing from the pull request.
 - To hold a pull request, open it as a draft or add the `no-automerge` label before its first push; converting an open pull request to a draft also stops the merge. Adding or removing `no-automerge` later also takes effect: the `relabel` job in `automerge.yml` runs `scripts/automerge.sh` on that label change and disables or re-enables auto-merge.
 - `main` does not require branches to be up to date (strict off); auto-merge is on. Dependabot pull requests need a Codex review too (`CODEX_GATE_DEPENDABOT_POLICY=require`).
+- Merge (squash) a pull request by a person only on the owner's explicit go-ahead (owner, 2026-11-12; this repository is public). Dependabot is the one exception: a Dependabot pull request that updates only patch or minor versions, with Dependabot's own head commit, turns on auto-merge by itself. `scripts/automerge.sh` leaves a person's pull request alone, except that `no-automerge` turns off an auto-merge the owner enabled.
 - Keep Dependabot enabled for both Python dependencies and GitHub Actions.
 - Prefer pinned major versions for GitHub Actions and keep them updated through Dependabot.
 - Preserve private vulnerability reporting support (shared `SECURITY.md` is inherited from the account-level `.github` repository).

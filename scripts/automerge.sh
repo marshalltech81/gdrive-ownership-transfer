@@ -4,17 +4,20 @@
 #   scripts/automerge.sh <pr-number> [--dry-run]
 #
 # Called by automerge.yml, which runs from the default branch. It only sets the flag: GitHub does the
-# merge itself once every required check on `main` (the five CI checks and codex-review) has passed and
-# every review thread is resolved. Nothing here bypasses those rules.
+# merge itself once every required check on `main`, codex-review included, has passed and every review
+# thread is resolved. Nothing here bypasses those rules.
+#
+# A pull request by a person is left alone (AGENTS.md: merge only on the owner's go-ahead). Auto-merge the
+# owner turned on by hand stays on, unless the opt-out label `no-automerge` is set, which turns it off.
 #
 # Eligibility is decided here, not in the workflow, because this script runs trusted code:
-#   - any pull request: open, not a draft, from a branch of this repository (not a fork), and without the
-#     opt-out label `no-automerge`;
+#   - open, not a draft, from a branch of this repository (not a fork), and without the opt-out label
+#     `no-automerge`;
 #   - a pull request by dependabot[bot] additionally needs its head commit authored by dependabot[bot] (a
 #     commit pushed on top by anyone else disqualifies it) and every `update-type:` in the head commit's
 #     `updated-dependencies:` block (the metadata dependabot/fetch-metadata parses) to be semver-patch or
 #     semver-minor. A major, or a dependency with no update type at all, is left for a human;
-#   - a pull request by any other bot is not auto-merged.
+#   - a pull request by a person or by any other bot is not auto-merged.
 #
 # Exit status: 0 auto-merge enabled (or already on); 3 not eligible; anything else is an error. Prints
 # `kind=dependabot` or `kind=human` on the first line of output so the workflow can choose its policy.
@@ -60,6 +63,13 @@ already="$(jq -r '.auto_merge != null' <<<"$pr_json")"
 if [[ "$author" == "dependabot[bot]" ]]; then kind=dependabot; elif [[ "$author_type" == "Bot" ]]; then kind=bot; else kind=human; fi
 echo "kind=${kind}"
 
+# A person's pull request merges on the owner's go-ahead, so leave its auto-merge as the owner set it. Only the
+# opt-out label falls through, to the code below that turns an enabled auto-merge off.
+if [[ "$kind" == "human" && "$opted_out" != "true" ]]; then
+  echo "PR #${pr}: by ${author}; merging is left to the owner's go-ahead, so auto-merge is not touched."
+  exit 3
+fi
+
 reason=""
 if [[ "$draft" == "true" ]]; then reason="draft"
 elif [[ "$same_repo" != "true" ]]; then reason="head is not a branch of this repository"
@@ -84,8 +94,6 @@ elif [[ "$kind" == "dependabot" ]]; then
     done
   fi
   [[ -z "$reason" ]] && echo "PR #${pr}: Dependabot update, ${deps} dependency update(s), all patch or minor, head ${head_sha:0:7} by dependabot[bot]."
-else
-  echo "PR #${pr}: by ${author}, not a draft, from this repository, no ${optout_label} label."
 fi
 
 if [[ -n "$reason" ]]; then
