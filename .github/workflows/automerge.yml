@@ -1,0 +1,82 @@
+# Let eligible pull requests merge themselves once the required checks pass (ci-infrastructure runbook, "Codex review gate").
+#
+# The workflow only turns on GitHub's auto-merge flag. GitHub performs the merge once the five CI checks
+# and codex-review have passed on the head commit and every review thread is resolved; nothing here bypasses
+# branch protection. No approval step is needed because `main` requires zero approving reviews.
+#
+# Eligible: any open, non-draft pull request from a branch of this repository without the `no-automerge`
+# label, by a person or by Dependabot. Dependabot pull requests are limited to patch and minor updates whose
+# head commit Dependabot authored; a major, or a commit pushed on top by anyone else, is left for a human.
+# Other bots are never auto-merged. scripts/automerge.sh decides this from trusted data.
+#
+# It runs from the default branch via `workflow_run`, when `CI` starts on a pull request push, so the
+# pull request's own code is never executed with a write-capable token (`pull_request` would do that, and
+# `pull_request_target` is not used here).
+#
+# Codex policy. A person's pull request waits for codex-review like any other required check; nothing
+# more is needed because Codex reviews every push here. For Dependabot pull requests, which Codex has not
+# reliably reviewed in this repository (Codex has not reviewed a Dependabot PR here), the job waits up to
+# CODEX_GATE_GRACE_MINUTES and then applies the repository variable CODEX_GATE_DEPENDABOT_POLICY:
+#   proceed (default)  codex-review passes with a title saying Codex did not review; the CI checks still gate.
+#   require            codex-review stays "in progress" until Codex reviews, or an admin bypasses it.
+name: automerge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested]
+
+permissions:
+  checks: write
+  contents: write
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: automerge-${{ github.event.workflow_run.pull_requests[0].number }}
+  cancel-in-progress: true
+
+jobs:
+  automerge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+        && github.event.workflow_run.pull_requests[0] != null
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 35
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Enable auto-merge if the pull request is eligible
+        id: enable
+        run: |
+          out="$(scripts/automerge.sh "$PR")" && rc=0 || rc=$?
+          printf '%s\n' "$out"
+          kind="$(sed -n 's/^kind=//p' <<<"$out" | head -1)"
+          echo "kind=${kind:-unknown}" >> "$GITHUB_OUTPUT"
+          case "$rc" in
+            0) echo "eligible=true" >> "$GITHUB_OUTPUT" ;;
+            3) echo "eligible=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
+
+      - name: Wait for Codex, then apply the dependency-update policy (Dependabot only)
+        if: >-
+          steps.enable.outputs.eligible == 'true' && steps.enable.outputs.kind == 'dependabot'
+            && vars.CODEX_GATE_DEPENDABOT_POLICY != 'require'
+        run: |
+          deadline=$(( $(date +%s) + 60 * GRACE_MINUTES ))
+          while :; do
+            state="$(scripts/codex-gate.sh "$PR" --query)"
+            echo "$(date -u +%H:%M:%S) codex-review state for #${PR}: ${state}"
+            case "$state" in
+              completed|skipped|draft) exit 0 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
+            sleep 60
+          done
+          scripts/codex-gate.sh "$PR" --proceed
+        env:
+          GRACE_MINUTES: ${{ vars.CODEX_GATE_GRACE_MINUTES || '20' }}
