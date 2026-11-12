@@ -93,9 +93,13 @@ jobs:
   # default branch's code only.
   relabel:
     if: github.event_name == 'pull_request_target' && github.event.label.name == 'no-automerge'
+    # The same group as the job above, so the two never run at once: a label change that arrives while that job
+    # is reading the pull request waits for it, then reads the result and corrects it. It never cancels a
+    # running evaluation; a newer label change replaces one still waiting, which is fine because each reads the
+    # pull request afresh.
     concurrency:
-      group: automerge-label-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: automerge-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
