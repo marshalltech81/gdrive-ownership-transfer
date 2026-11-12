@@ -173,6 +173,7 @@ Changes are expected to keep these checks green:
 
 - Keep GitHub Actions workflow permissions minimal and explicit.
 - The codex-gate, automerge and conflicts workflows run from the default branch through `workflow_run`, so a pull request's own code never runs with their write token. Do not switch them to `pull_request` or `pull_request_target`.
+- To hold a pull request, open it as a draft or add the `no-automerge` label before its first push; converting an open pull request to a draft also stops the merge. Adding the label to a pull request whose auto-merge is already enabled does not cancel it (label changes do not start `CI`): run `gh pr merge --disable-auto <number>` as well.
 - `main` does not require branches to be up to date (strict off); auto-merge is on. Dependabot pull requests need a Codex review too (`CODEX_GATE_DEPENDABOT_POLICY=require`).
 - Keep Dependabot enabled for both Python dependencies and GitHub Actions.
 - Prefer pinned major versions for GitHub Actions and keep them updated through Dependabot.
